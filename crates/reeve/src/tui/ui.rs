@@ -1,0 +1,801 @@
+//! Rendering for the stacked dashboard (ytunnel-style: bordered panels, accent
+//! on focus, status line at the bottom).
+
+use super::{App, Panel};
+use crate::daemon::Status;
+use ratatui::{
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Clear, Paragraph},
+    Frame,
+};
+
+const ACCENT: Color = Color::Cyan;
+
+pub fn render(f: &mut Frame, app: &App) {
+    let servers_h = (app.state.servers.len() as u16 + 2).clamp(3, 14);
+    let php_h = 3;
+
+    // Order top→bottom: Servers, Vhosts (expands), PHP (least-used, bottom),
+    // then a context-aware key bar and a status/message line.
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),         // title
+            Constraint::Length(servers_h), // servers
+            Constraint::Min(3),            // vhosts
+            Constraint::Length(php_h),     // php
+            Constraint::Length(1),         // key bar
+            Constraint::Length(1),         // status/message
+        ])
+        .split(f.area());
+
+    render_title(f, app, chunks[0]);
+    render_servers(f, app, chunks[1]);
+    render_vhosts(f, app, chunks[2]);
+    render_php(f, app, chunks[3]);
+    render_keys(f, app, chunks[4]);
+    render_status(f, app, chunks[5]);
+
+    if app.wizard.is_some() {
+        render_wizard(f, app);
+    }
+    if app.server_wizard.is_some() {
+        render_server_wizard(f, app);
+    }
+    if app.settings_modal.is_some() {
+        render_settings_modal(f, app);
+    }
+    if app.php_install.is_some() {
+        render_php_install(f, app);
+    }
+    if app.ext_modal.is_some() {
+        render_ext_modal(f, app);
+    }
+    if app.config_modal.is_some() {
+        render_config_modal(f, app);
+    }
+    if app.confirm_remove.is_some() {
+        render_confirm(f, app, "vhost", app.confirm_remove.as_deref());
+    }
+    if app.confirm_remove_php.is_some() {
+        render_confirm(f, app, "PHP", app.confirm_remove_php.as_deref());
+    }
+    if app.confirm_remove_server.is_some() {
+        render_confirm(f, app, "server", app.confirm_remove_server.as_deref());
+    }
+}
+
+fn render_php_install(f: &mut Frame, app: &App) {
+    let m = app.php_install.as_ref().unwrap();
+    let area = centered_rect(50, 8, f.area());
+    f.render_widget(Clear, area);
+    let mut lines = vec![
+        Line::raw(""),
+        Line::from(vec![
+            Span::raw("  Version: "),
+            Span::styled(
+                format!("{}▏", m.version),
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::raw(""),
+    ];
+    if let Some(err) = &m.error {
+        lines.push(Line::from(Span::styled(
+            format!("  {err}"),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        "  e.g. 8.3 · enter install · esc cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .title(Span::styled(
+            " Install PHP ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn render_ext_modal(f: &mut Frame, app: &App) {
+    let m = app.ext_modal.as_ref().unwrap();
+    // Window the loaded list so long lists (php -m is big) stay on screen.
+    let total = m.loaded.len();
+    let win = 10usize;
+    let start = if total <= win {
+        0
+    } else {
+        m.sel.saturating_sub(win / 2).min(total - win)
+    };
+    let end = (start + win).min(total);
+    let area = centered_rect(58, (end - start) as u16 + 9, f.area());
+    f.render_widget(Clear, area);
+
+    let typing = !m.input.trim().is_empty();
+    let mut lines = vec![
+        Line::from(vec![
+            Span::raw("  Add: "),
+            Span::styled(
+                format!("{}▏", m.input),
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "   (e.g. redis, then enter)",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::raw(""),
+        Line::from(Span::styled(
+            format!("  Loaded ({total}):"),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+    ];
+    if total == 0 {
+        lines.push(Line::from(Span::styled(
+            "  (none)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    for (i, ext) in m.loaded[start..end].iter().enumerate() {
+        let idx = start + i;
+        let active = idx == m.sel && !typing;
+        let marker = if active { "› " } else { "  " };
+        let style = if active {
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(Span::styled(format!("{marker}{ext}"), style)));
+    }
+    if end < total {
+        lines.push(Line::from(Span::styled(
+            "  …",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    lines.push(Line::raw(""));
+    if let Some(err) = &m.error {
+        lines.push(Line::from(Span::styled(
+            format!("  {err}"),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        "  type+enter add · ↑↓ select · del/enter remove · esc close",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .title(Span::styled(
+            format!(" PHP {} extensions ", m.version),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn render_config_modal(f: &mut Frame, app: &App) {
+    let m = app.config_modal.as_ref().unwrap();
+    let area = centered_rect(76, 16, f.area());
+    f.render_widget(Clear, area);
+
+    let backend = super::BACKENDS[m.backend_idx].as_str();
+    let cursor = |s: &str, active: bool| {
+        if active {
+            format!("{s}▏")
+        } else {
+            s.to_string()
+        }
+    };
+    let field_line = |idx: usize, label: &str, value: String| -> Line {
+        let active = m.field == idx;
+        let marker = if active { "› " } else { "  " };
+        let vstyle = if active {
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        Line::from(vec![
+            Span::raw(format!("{marker}{label:<14}")),
+            Span::styled(value, vstyle),
+        ])
+    };
+
+    let mut lines = vec![
+        Line::raw(""),
+        field_line(0, "Local TLDs:", cursor(&m.tld, m.field == 0)),
+        field_line(1, "Sites root:", cursor(&m.sites_root, m.field == 1)),
+        field_line(2, "Def backend:", format!("‹ {backend} ›")),
+        Line::raw(""),
+    ];
+    if let Some(err) = &m.error {
+        lines.push(Line::from(Span::styled(
+            format!("  {err}"),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    // Help text: how to enter multiple TLDs + which are safe.
+    lines.push(Line::from(Span::styled(
+        "  Space/comma-separated. Use reserved TLDs that can't be real domains:",
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(Span::styled(
+        "    test       recommended — RFC 6761, never routable",
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(Span::styled(
+        "    localhost  reserved; *.localhost always maps to loopback",
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(Span::styled(
+        "    internal   ICANN-designated for private use   ·   lan  common, safe",
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  Avoid .dev/.app (real TLDs → forced HTTPS) and .local (Bonjour).",
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "  tab/↑↓ field · ←→ backend · enter save · esc cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .title(Span::styled(
+            " Preferences ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn render_settings_modal(f: &mut Frame, app: &App) {
+    let m = app.settings_modal.as_ref().unwrap();
+    let defs = crate::backends::settings_defs(m.backend);
+    let area = centered_rect(64, defs.len() as u16 * 2 + 6, f.area());
+    f.render_widget(Clear, area);
+
+    let mut lines = vec![Line::raw("")];
+    for (i, def) in defs.iter().enumerate() {
+        let active = m.field == i;
+        let marker = if active { "› " } else { "  " };
+        let val = m.values.get(i).cloned().unwrap_or_default();
+        let cursor = if active { format!("{val}▏") } else { val };
+        let vstyle = if active {
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(vec![
+            Span::raw(format!("{marker}{:<22}", format!("{}:", def.label))),
+            Span::styled(cursor, vstyle),
+            Span::styled(
+                format!("   ({})", def.help),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    }
+    lines.push(Line::raw(""));
+    if let Some(err) = &m.error {
+        lines.push(Line::from(Span::styled(
+            format!("  {err}"),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        "  tab/↑↓ field · type to edit · enter save · esc cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .title(Span::styled(
+            format!(" Settings: {} ({}) ", m.server_name, m.backend),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn render_server_wizard(f: &mut Frame, app: &App) {
+    let w = app.server_wizard.as_ref().unwrap();
+    let area = centered_rect(62, 12, f.area());
+    f.render_widget(Clear, area);
+
+    let backend = super::BACKENDS[w.backend_idx].as_str();
+    let inst = if w.installed.get(w.backend_idx).copied().unwrap_or(false) {
+        "installed"
+    } else {
+        "not installed — brew installs on start"
+    };
+    let field_line = |idx: usize, label: &str, value: String| -> Line {
+        let active = w.field == idx;
+        let marker = if active { "› " } else { "  " };
+        let vstyle = if active {
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        Line::from(vec![
+            Span::raw(format!("{marker}{label:<12}")),
+            Span::styled(value, vstyle),
+        ])
+    };
+    let cursor = |s: &str, active: bool| {
+        if active {
+            format!("{s}▏")
+        } else {
+            s.to_string()
+        }
+    };
+
+    let mut lines = vec![
+        Line::raw(""),
+        field_line(0, "Backend:", format!("‹ {backend} ›  ({inst})")),
+        field_line(1, "HTTP port:", cursor(&w.http, w.field == 1)),
+        field_line(2, "HTTPS port:", cursor(&w.https, w.field == 2)),
+        field_line(
+            3,
+            "Default site:",
+            if w.default_site {
+                "[x] serve sites root on HTTP".into()
+            } else {
+                "[ ] off".into()
+            },
+        ),
+        Line::raw(""),
+    ];
+    if let Some(err) = &w.error {
+        lines.push(Line::from(Span::styled(
+            format!("  {err}"),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        "  tab/↑↓ field · ←→/space change · enter save · esc cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let title = match &w.editing {
+        Some(n) => format!(" Edit Server: {n} "),
+        None => " New Server ".to_string(),
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .title(Span::styled(
+            title,
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// Context-aware key hints for the focused panel.
+fn render_keys(f: &mut Frame, app: &App, area: Rect) {
+    let keys: &[(&str, &str)] = match app.focus {
+        Panel::Servers => &[
+            ("enter", "start"),
+            ("x", "stop"),
+            ("r", "restart"),
+            ("n", "new"),
+            ("e", "edit"),
+            ("s", "settings"),
+            ("del", "remove"),
+            ("a", "apply"),
+            ("c", "config"),
+            ("q", "quit"),
+        ],
+        Panel::Vhosts => &[
+            ("n", "new"),
+            ("e", "edit"),
+            ("r", "remove"),
+            ("a", "apply"),
+            ("v", "validate"),
+            ("c", "config"),
+            ("q", "quit"),
+        ],
+        Panel::Php => &[
+            ("enter", "restart"),
+            ("n", "install"),
+            ("e", "exts"),
+            ("d", "default"),
+            ("r", "remove"),
+            ("c", "config"),
+            ("q", "quit"),
+        ],
+    };
+    let mut spans = vec![Span::raw(" ")];
+    for (k, label) in keys {
+        spans.push(Span::styled(
+            (*k).to_string(),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            format!(" {label}   "),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn render_confirm(f: &mut Frame, _app: &App, noun: &str, name: Option<&str>) {
+    let Some(name) = name else { return };
+    let area = centered_rect(52, 5, f.area());
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Red))
+        .title(Span::styled(
+            format!(" Remove {noun} "),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ));
+    let lines = vec![
+        Line::raw(""),
+        Line::from(format!("  Remove {noun} '{name}'?")),
+        Line::from(Span::styled(
+            "  y confirm · n/esc cancel",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    Rect {
+        x,
+        y,
+        width: width.min(area.width),
+        height: height.min(area.height),
+    }
+}
+
+fn render_wizard(f: &mut Frame, app: &App) {
+    let w = app.wizard.as_ref().unwrap();
+    let area = centered_rect(66, 13, f.area());
+    f.render_widget(Clear, area);
+
+    let php = app
+        .state
+        .php_versions
+        .get(w.php_idx)
+        .map(|p| p.version.as_str())
+        .unwrap_or("-");
+    let server = app
+        .state
+        .servers
+        .get(w.server_idx)
+        .map(|s| s.name.as_str())
+        .unwrap_or("-");
+
+    let field_line = |idx: usize, label: &str, value: String| -> Line {
+        let active = w.field == idx;
+        let marker = if active { "› " } else { "  " };
+        let vstyle = if active {
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        Line::from(vec![
+            Span::raw(format!("{marker}{label:<10}")),
+            Span::styled(value, vstyle),
+        ])
+    };
+
+    let cursor = |s: &str, active: bool| {
+        if active {
+            format!("{s}▏")
+        } else {
+            s.to_string()
+        }
+    };
+    let docroot_shown = if w.docroot.is_empty() && w.field != 1 {
+        let host = if w.server_name.is_empty() {
+            "<host>"
+        } else {
+            &w.server_name
+        };
+        format!(
+            "{}/{}  (default)",
+            app.config.sites_root.trim_end_matches('/'),
+            host
+        )
+    } else {
+        cursor(&w.docroot, w.field == 1)
+    };
+    let name_shown = if w.server_name.is_empty() && w.field != 0 {
+        "(required, e.g. app.test)".to_string()
+    } else {
+        cursor(&w.server_name, w.field == 0)
+    };
+
+    let mut lines = vec![
+        Line::raw(""),
+        field_line(0, "Hostname:", name_shown),
+        field_line(1, "Doc root:", docroot_shown),
+        field_line(2, "PHP:", format!("‹ {php} ›")),
+        field_line(3, "Server:", format!("‹ {server} ›")),
+        field_line(
+            4,
+            "SSL:",
+            if w.ssl {
+                "[x] on".into()
+            } else {
+                "[ ] off".into()
+            },
+        ),
+        Line::raw(""),
+    ];
+    if let Some(err) = &w.error {
+        lines.push(Line::from(Span::styled(
+            format!("  {err}"),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        "  tab/↑↓ field · ←→/space change · enter create · esc cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let title = if w.editing.is_some() {
+        " Edit Vhost "
+    } else {
+        " New Vhost "
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .title(Span::styled(
+            title,
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(Paragraph::new(lines).block(block), area);
+
+    // Doc root autocomplete dropdown (Doc root field, dropdown open).
+    if w.field == 1 && w.dropdown_open {
+        let sugg = w.path_suggestions();
+        if !sugg.is_empty() {
+            let dd_w = 48u16.min(area.width.saturating_sub(4));
+            let dd_h = (sugg.len() as u16 + 2).min(10);
+            let dd = Rect {
+                x: area.x + 13,
+                y: (area.y + 4).min(area.y + area.height.saturating_sub(dd_h)),
+                width: dd_w,
+                height: dd_h,
+            };
+            f.render_widget(Clear, dd);
+            // Highlight the selected row (or the first dir, the →/Tab target).
+            let target = w.path_sel.or_else(|| sugg.iter().position(|e| e.is_dir));
+            let rows: Vec<Line> = sugg
+                .iter()
+                .enumerate()
+                .map(|(i, e)| {
+                    let label = if e.is_dir {
+                        format!(" {}/", e.name)
+                    } else {
+                        format!(" {}", e.name)
+                    };
+                    let style = if w.path_sel == Some(i) {
+                        Style::default().add_modifier(Modifier::REVERSED)
+                    } else if Some(i) == target {
+                        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+                    } else if e.is_dir {
+                        Style::default().fg(ACCENT)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    };
+                    Line::from(Span::styled(label, style))
+                })
+                .collect();
+            let dd_block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray))
+                .title(Span::styled(
+                    " ↑↓ select · → open · tab complete · esc close ",
+                    Style::default().fg(Color::DarkGray),
+                ));
+            f.render_widget(Paragraph::new(rows).block(dd_block), dd);
+        }
+    }
+}
+
+fn render_title(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let tlds = app
+        .config
+        .local_tlds
+        .iter()
+        .map(|t| format!(".{t}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let dns = if app.dns_ok {
+        Span::styled(
+            format!("   [{tlds} ✓ resolving]"),
+            Style::default().fg(Color::Green),
+        )
+    } else {
+        Span::styled(
+            format!("   [{tlds} ⚠ not resolving — press D to enable]"),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+    };
+    let line = Line::from(vec![
+        Span::styled(
+            " reeve",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        dns,
+    ]);
+    f.render_widget(Paragraph::new(line), area);
+}
+
+fn panel_block(title: &str, focused: bool) -> Block<'_> {
+    let style = if focused {
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(if focused {
+            Style::default().fg(ACCENT)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        })
+        .title(Span::styled(format!(" {title} "), style))
+}
+
+fn status_span(status: Status) -> Span<'static> {
+    let (dot, color) = match status {
+        Status::Running => ("● running", Color::Green),
+        Status::Stopped => ("○ stopped", Color::DarkGray),
+        Status::Error => ("✗ error", Color::Red),
+    };
+    Span::styled(dot, Style::default().fg(color))
+}
+
+fn row_style(selected: bool, focused: bool) -> Style {
+    if selected && focused {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else if selected {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    }
+}
+
+fn render_servers(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let focused = app.focus == Panel::Servers;
+    let mut lines: Vec<Line> = Vec::new();
+    if app.state.servers.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no servers — `reeve server add caddy`",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    for (i, s) in app.state.servers.iter().enumerate() {
+        let sel = i == app.sel_server;
+        let status = app.server_status.get(i).copied().unwrap_or(Status::Stopped);
+        // Pad the ports into a fixed-width column so the status marker aligns
+        // whether ports are short (:80/:443) or long (:8080/:8443).
+        let ports = format!(":{}/:{}", s.http_port, s.https_port);
+        let head = format!(
+            " {} {:<10} {:<7} {:<13} ",
+            if sel && focused { "›" } else { " " },
+            s.name,
+            s.backend,
+            ports,
+        );
+        lines.push(
+            Line::from(vec![Span::raw(head), status_span(status)]).style(row_style(sel, focused)),
+        );
+    }
+    f.render_widget(
+        Paragraph::new(lines).block(panel_block("Servers", focused)),
+        area,
+    );
+}
+
+fn render_php(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let focused = app.focus == Panel::Php;
+    let default = app.config.default_php.clone();
+    let mut spans: Vec<Span> = vec![Span::raw(" ")];
+    if app.state.php_versions.is_empty() {
+        spans.push(Span::styled(
+            "no PHP — `reeve php install 8.3`",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    for (i, p) in app.state.php_versions.iter().enumerate() {
+        let sel = i == app.sel_php;
+        let status = app.php_status.get(i).copied().unwrap_or(Status::Stopped);
+        let is_default = default.as_deref() == Some(p.version.as_str());
+        let label = format!("{}{} ", p.version, if is_default { "★" } else { "" });
+        spans.push(Span::styled(label, row_style(sel, focused)));
+        spans.push(status_span(status));
+        spans.push(Span::raw("   "));
+    }
+    f.render_widget(
+        Paragraph::new(Line::from(spans)).block(panel_block("PHP", focused)),
+        area,
+    );
+}
+
+/// Browser URL for a vhost, derived from its owning server's scheme + port.
+/// Ports 80/443 are omitted so the URL is clean (and clickable in iTerm/Ghostty).
+pub fn vhost_url(app: &App, vhost: &crate::state::Vhost) -> String {
+    match app.state.get_server(&vhost.server) {
+        Some(s) if vhost.ssl => {
+            if s.https_port == 443 {
+                format!("https://{}", vhost.server_name)
+            } else {
+                format!("https://{}:{}", vhost.server_name, s.https_port)
+            }
+        }
+        Some(s) => {
+            if s.http_port == 80 {
+                format!("http://{}", vhost.server_name)
+            } else {
+                format!("http://{}:{}", vhost.server_name, s.http_port)
+            }
+        }
+        None => format!("(server '{}' missing)", vhost.server),
+    }
+}
+
+fn render_vhosts(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let focused = app.focus == Panel::Vhosts;
+    let mut lines: Vec<Line> = Vec::new();
+    if app.state.vhosts.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no vhosts — press 'n' to create one",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    for (i, v) in app.state.vhosts.iter().enumerate() {
+        let sel = i == app.sel_vhost;
+        let url = vhost_url(app, v);
+        // The URL is plain text so iTerm2/Ghostty auto-linkify it for cmd-click.
+        lines.push(
+            Line::from(vec![
+                Span::raw(format!(" {} ", if sel && focused { "›" } else { " " })),
+                Span::styled(
+                    format!("{url:<30}"),
+                    Style::default()
+                        .fg(ACCENT)
+                        .add_modifier(Modifier::UNDERLINED),
+                ),
+                Span::raw(format!(
+                    " {:<8} {:<5} {}",
+                    v.server, v.php_version, v.docroot
+                )),
+            ])
+            .style(row_style(sel, focused)),
+        );
+    }
+    f.render_widget(
+        Paragraph::new(lines).block(panel_block("Vhosts", focused)),
+        area,
+    );
+}
+
+fn render_status(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            format!(" {}", app.message),
+            Style::default().fg(Color::Gray),
+        ))
+        .alignment(Alignment::Left),
+        area,
+    );
+}

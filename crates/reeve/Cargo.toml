@@ -1,0 +1,34 @@
+# Published to crates.io as `reeve-cli` because the `reeve` name is already
+# taken; the installed binary is still `reeve`.
+[package]
+name = "reeve-cli"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.80"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage = "https://github.com/yetidevworks/reeve"
+readme = "README.md"
+description = "Localhost web dev stack manager: web servers, per-vhost PHP versions, SSL, and DNS — RunCloud, scaled down."
+keywords = ["php", "fpm", "caddy", "nginx", "localhost"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "reeve"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full", "process"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+dirs = "6"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ratatui = "0.30"
+crossterm = "0.29"
+libc = "0.2"
