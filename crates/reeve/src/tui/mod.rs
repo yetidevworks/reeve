@@ -18,11 +18,13 @@ use anyhow::Result;
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        MouseButton, MouseEvent, MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{backend::CrosstermBackend, layout::Rect, Terminal};
+use std::cell::RefCell;
 use std::io::{self, Stdout};
 use std::time::Duration;
 
@@ -31,7 +33,20 @@ pub enum Panel {
     Servers,
     Php,
     Vhosts,
+    /// Read-only list of sites expanded from parked directories.
+    Parked,
     Services,
+}
+
+/// A panel's on-screen geometry from the last render, used to map mouse clicks
+/// and wheel events back to a panel + row. `offset` is the first visible row
+/// index (panels scroll to keep their selection in view), `len` the row count.
+#[derive(Clone, Copy)]
+pub struct PanelHit {
+    pub panel: Panel,
+    pub rect: Rect,
+    pub offset: usize,
+    pub len: usize,
 }
 
 pub struct App {
@@ -45,6 +60,11 @@ pub struct App {
     pub vhost_sort_col: usize,
     pub vhost_sort_asc: bool,
     pub sel_service: usize,
+    /// Selection in the Parked panel (read-only; used for scrolling/inspection).
+    pub sel_parked: usize,
+    /// Panel rects from the last render, for mouse hit-testing. Interior
+    /// mutability because `ui::render` takes `&App`.
+    pub hit_rects: RefCell<Vec<PanelHit>>,
     pub server_status: Vec<crate::ops::ServeState>,
     pub php_status: Vec<Status>,
     pub service_status: Vec<Status>,
@@ -301,6 +321,8 @@ impl App {
             vhost_sort_col: 0,
             vhost_sort_asc: true,
             sel_service: 0,
+            sel_parked: 0,
+            hit_rects: RefCell::new(Vec::new()),
             server_status: Vec::new(),
             php_status: Vec::new(),
             service_status: Vec::new(),
@@ -401,26 +423,40 @@ impl App {
         self.sel_service = self
             .sel_service
             .min(self.state.services.len().saturating_sub(1));
+        self.sel_parked = self
+            .sel_parked
+            .min(self.parked_vhosts.len().saturating_sub(1));
     }
 
     fn focus_len(&self) -> usize {
-        match self.focus {
+        self.panel_len(self.focus)
+    }
+
+    fn panel_len(&self, panel: Panel) -> usize {
+        match panel {
             Panel::Servers => self.state.servers.len(),
             Panel::Php => self.state.php_versions.len(),
             Panel::Vhosts => self.state.vhosts.len(),
+            Panel::Parked => self.parked_vhosts.len(),
             Panel::Services => self.state.services.len(),
         }
     }
 
     fn sel_mut(&mut self) -> &mut usize {
-        match self.focus {
+        self.sel_mut_of(self.focus)
+    }
+
+    fn sel_mut_of(&mut self, panel: Panel) -> &mut usize {
+        match panel {
             Panel::Servers => &mut self.sel_server,
             Panel::Php => &mut self.sel_php,
             Panel::Vhosts => &mut self.sel_vhost,
+            Panel::Parked => &mut self.sel_parked,
             Panel::Services => &mut self.sel_service,
         }
     }
 
+    /// Move the focused panel's selection, wrapping around the ends.
     fn move_sel(&mut self, delta: isize) {
         let len = self.focus_len();
         if len == 0 {
@@ -431,18 +467,101 @@ impl App {
         *sel = new;
     }
 
+    /// Move a panel's selection by `delta`, clamped to the ends (no wrap). Used
+    /// for paging and the mouse wheel, where wrap-around would be jarring.
+    fn move_sel_clamped(&mut self, panel: Panel, delta: isize) {
+        let len = self.panel_len(panel);
+        if len == 0 {
+            return;
+        }
+        let sel = self.sel_mut_of(panel);
+        let new = (*sel as isize + delta).clamp(0, len as isize - 1) as usize;
+        *sel = new;
+    }
+
     fn cycle_focus(&mut self, forward: bool) {
-        // Visual order top→bottom: Servers, Vhosts, PHP, Services.
+        // Visual order top→bottom: Servers, Vhosts, Parked, PHP, Services.
         self.focus = match (self.focus, forward) {
             (Panel::Servers, true) => Panel::Vhosts,
-            (Panel::Vhosts, true) => Panel::Php,
+            (Panel::Vhosts, true) => Panel::Parked,
+            (Panel::Parked, true) => Panel::Php,
             (Panel::Php, true) => Panel::Services,
             (Panel::Services, true) => Panel::Servers,
             (Panel::Servers, false) => Panel::Services,
             (Panel::Services, false) => Panel::Php,
-            (Panel::Php, false) => Panel::Vhosts,
+            (Panel::Php, false) => Panel::Parked,
+            (Panel::Parked, false) => Panel::Vhosts,
             (Panel::Vhosts, false) => Panel::Servers,
         };
+    }
+
+    /// Route a mouse event to a panel. Ignored while a modal is open. The wheel
+    /// scrolls (and focuses) the panel under the cursor; a left click focuses a
+    /// panel and selects the clicked row.
+    fn handle_mouse(&mut self, ev: MouseEvent) {
+        if self.modal_open() {
+            return;
+        }
+        match ev.kind {
+            MouseEventKind::ScrollDown => self.scroll_at(ev.column, ev.row, 3),
+            MouseEventKind::ScrollUp => self.scroll_at(ev.column, ev.row, -3),
+            MouseEventKind::Down(MouseButton::Left) => self.click_at(ev.column, ev.row),
+            _ => {}
+        }
+    }
+
+    fn scroll_at(&mut self, col: u16, row: u16, delta: isize) {
+        if let Some(hit) = self.hit_at(col, row) {
+            self.focus = hit.panel;
+            self.move_sel_clamped(hit.panel, delta);
+        }
+    }
+
+    fn click_at(&mut self, col: u16, row: u16) {
+        let Some(hit) = self.hit_at(col, row) else {
+            return;
+        };
+        self.focus = hit.panel;
+        // The PHP panel is a single horizontal row — focus only, no row mapping.
+        if hit.panel == Panel::Php || hit.len == 0 {
+            return;
+        }
+        // Content starts one row below the panel's top border.
+        let content_top = hit.rect.y + 1;
+        if row > content_top {
+            let visible = (row - content_top) as usize;
+            let idx = hit.offset + visible;
+            if idx < hit.len {
+                *self.sel_mut_of(hit.panel) = idx;
+            }
+        }
+    }
+
+    fn hit_at(&self, col: u16, row: u16) -> Option<PanelHit> {
+        self.hit_rects.borrow().iter().copied().find(|h| {
+            col >= h.rect.x
+                && col < h.rect.x + h.rect.width
+                && row >= h.rect.y
+                && row < h.rect.y + h.rect.height
+        })
+    }
+
+    /// True when any modal/confirm is open (input is captured).
+    fn modal_open(&self) -> bool {
+        self.wizard.is_some()
+            || self.server_wizard.is_some()
+            || self.settings_modal.is_some()
+            || self.php_install.is_some()
+            || self.ext_modal.is_some()
+            || self.config_modal.is_some()
+            || self.php_settings.is_some()
+            || self.service_picker.is_some()
+            || self.park_modal.is_some()
+            || self.log_modal.is_some()
+            || self.doctor_modal.is_some()
+            || self.confirm_remove.is_some()
+            || self.confirm_remove_php.is_some()
+            || self.confirm_remove_server.is_some()
     }
 
     /// Run an action, capturing success/error into the message line instead of
@@ -553,10 +672,12 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) ->
 
         // Poll with a timeout so statuses refresh even without keypresses.
         if event::poll(Duration::from_millis(2000))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
                     handle_key(app, key.code, key.modifiers);
                 }
+                Event::Mouse(ev) => app.handle_mouse(ev),
+                _ => {}
             }
         } else {
             app.refresh();
@@ -662,11 +783,16 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         // Left/Right matter for the horizontal PHP row; Up/Down for the lists.
         KeyCode::Up | KeyCode::Char('k') | KeyCode::Left | KeyCode::Char('h') => app.move_sel(-1),
         KeyCode::Down | KeyCode::Char('j') | KeyCode::Right | KeyCode::Char('l') => app.move_sel(1),
+        // Page/Home/End scroll the focused (possibly long) list — clamped, no wrap.
+        KeyCode::PageUp => app.move_sel_clamped(app.focus, -10),
+        KeyCode::PageDown => app.move_sel_clamped(app.focus, 10),
+        KeyCode::Home => app.move_sel_clamped(app.focus, isize::MIN / 2),
+        KeyCode::End => app.move_sel_clamped(app.focus, isize::MAX / 2),
         KeyCode::Enter => match app.focus {
             // Enter activates: starts a server / restarts a PHP FPM master.
             Panel::Servers => start_selected_server(app),
             Panel::Php => restart_selected_fpm(app),
-            Panel::Vhosts => {}
+            Panel::Vhosts | Panel::Parked => {}
             Panel::Services => start_selected_service(app),
         },
         KeyCode::Char('s') if app.focus == Panel::Servers => open_settings(app),
@@ -703,7 +829,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                 }
             }
             Panel::Php => restart_selected_fpm(app),
-            Panel::Vhosts => {
+            Panel::Vhosts | Panel::Parked => {
                 let r = apply_all().map(|n| format!("applied {n} server(s)"));
                 app.act("restart", r);
             }
@@ -729,10 +855,14 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                     error: None,
                 })
             }
+            // Parked sites are created by parking a directory ('p' on Vhosts).
+            Panel::Parked => open_park_modal(app),
             Panel::Services => app.service_picker = Some(ServicePicker { sel: 0 }),
         },
         KeyCode::Char('v') => validate_all(app),
-        KeyCode::Char('p') if app.focus == Panel::Vhosts => open_park_modal(app),
+        KeyCode::Char('p') if matches!(app.focus, Panel::Vhosts | Panel::Parked) => {
+            open_park_modal(app)
+        }
         // Sort the vhost list by column 1-4 (host/server/php/path); pressing the
         // same column again toggles ascending/descending.
         KeyCode::Char(c @ '1'..='4') if app.focus == Panel::Vhosts => {
@@ -781,6 +911,8 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                     app.confirm_remove_php = Some(ver);
                 }
             }
+            // Parked sites are derived — remove the park itself, not a site.
+            Panel::Parked => open_park_modal(app),
             Panel::Services => {
                 if let Some(kind) = app.selected_service() {
                     let r = ops::remove_service(kind).map(|_| format!("removed '{kind}'"));
@@ -798,7 +930,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             Panel::Vhosts => open_edit_wizard(app),
             Panel::Servers => open_edit_server(app),
             Panel::Php => open_ext_modal(app),
-            Panel::Services => {}
+            Panel::Parked | Panel::Services => {}
         },
         KeyCode::Char('D') => {
             let tlds = app.config.local_tlds.clone();
@@ -835,6 +967,11 @@ fn open_log(app: &mut App) {
             .state
             .vhosts
             .get(app.sel_vhost)
+            .map(|v| format!("server-{}", v.server)),
+        // A parked site has no log of its own — show its owning server's.
+        Panel::Parked => app
+            .parked_vhosts
+            .get(app.sel_parked)
             .map(|v| format!("server-{}", v.server)),
         Panel::Services => app.selected_service().map(crate::services::service_id),
     };

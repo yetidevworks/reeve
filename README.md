@@ -141,7 +141,9 @@ reeve
 │   nginx    nginx   :9090/:9443  ○ stopped             │
 ├ Vhosts ───────────────────────────────────────────────┤
 │   https://app.test   caddy   8.3   ~/Sites/app        │
-│   https://blog.test  caddy   8.3   ~/Sites/blog (parked)│
+├ Parked (37)  [1–4 of 37] ──────────────────────────────┤
+│ › https://blog.test  caddy   8.3   ~/Sites/blog        │
+│   https://shop.test  caddy   8.3   ~/Sites/shop        │
 ├ PHP ──────────────────────────────────────────────────┤
 │ 8.3★ ● running 🐛debug    8.4 ● running               │
 ├ Services ─────────────────────────────────────────────┤
@@ -157,7 +159,9 @@ keys for the focused panel).
 | Key | Action |
 |-----|--------|
 | `↑` `↓` `←` `→` / `hjkl` | Move selection within the focused panel |
-| `Tab` / `Shift-Tab` | Switch panel (Servers → Vhosts → PHP → Services) |
+| `PgUp` `PgDn` / `Home` `End` | Page / jump through a long list (e.g. Parked) |
+| mouse | Click a row to focus + select it; wheel scrolls the panel under the cursor |
+| `Tab` / `Shift-Tab` | Switch panel (Servers → Vhosts → Parked → PHP → Services) |
 | `n` | New — server / vhost / PHP install / service (per focused panel) |
 | `e` | Edit — server (ports, backend, default site) / vhost / PHP extensions |
 | `Enter` | Start server or service / restart FPM master |
@@ -165,7 +169,7 @@ keys for the focused panel).
 | `s` | Per-backend settings (Servers) / per-version PHP settings (PHP) |
 | `x` | Cycle Xdebug off→debug→profile (PHP panel) |
 | `d` | Set default PHP version (PHP panel) |
-| `p` | Park a directory / manage parks (Vhosts panel) |
+| `p` | Park a directory / manage parks (Vhosts or Parked panel) |
 | `L` | View the focused item's log |
 | `?` | Full `doctor` health report |
 | `T` | Install the mkcert CA into your trust store (`ssl trust`) |

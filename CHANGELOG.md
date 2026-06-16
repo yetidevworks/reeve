@@ -46,8 +46,13 @@ full TUI/CLI parity, and performance/correctness fixes.
 - **Directory parking** (Valet-style): `park add <dir> --server <s> --php <v>`
   auto-serves every web subfolder as `<folder>.<tld>` with framework
   auto-detection (Laravel/Symfony/Drupal/WordPress/Grav); new folders appear on
-  the next `apply`. `park list|remove`, and parked sites show (read-only) in the
-  TUI Vhosts panel.
+  the next `apply`. `park list|remove`, and parked sites show (read-only) in a
+  dedicated, scrollable **Parked** TUI panel separate from declared vhosts.
+- **Mouse + scrolling in the TUI**: click a panel/row to focus and select it,
+  the scroll wheel scrolls the panel under the cursor, and `PageUp`/`PageDown`/
+  `Home`/`End` page through long lists. Panels taller than their box (e.g. a
+  parked `~/Sites` with dozens of projects) now scroll to keep the selection in
+  view instead of clipping.
 - **Full TUI/CLI parity**: the new-vhost wizard gained a reverse-proxy field, a
   park manager (`p`) handles add/remove, `?` opens the full `doctor` report, and
   `T` runs `ssl trust` — so everything the CLI can do is reachable in the TUI.

@@ -1,7 +1,7 @@
 //! Rendering for the stacked dashboard (ytunnel-style: bordered panels, accent
 //! on focus, status line at the bottom).
 
-use super::{App, Panel};
+use super::{App, Panel, PanelHit};
 use crate::daemon::Status;
 use crate::doctor::Health;
 use ratatui::{
@@ -18,15 +18,26 @@ pub fn render(f: &mut Frame, app: &App) {
     let servers_h = (app.state.servers.len() as u16 + 2).clamp(3, 14);
     let php_h = 3;
     let services_h = (app.state.services.len() as u16 + 2).clamp(3, 8);
+    let declared_h = (app.state.vhosts.len() as u16 + 2).clamp(3, 8);
 
-    // Order top→bottom: Servers, Vhosts (expands), PHP, Services (least-used,
-    // bottom), then a context-aware key bar and a status/message line.
+    // The list with the most rows gets the leftover space and scrolls
+    // internally; the other stays a fixed height. Directory parking usually
+    // makes Parked the long one, but with no parks let Vhosts expand instead.
+    let (vhosts_c, parked_c) = if app.parked_vhosts.is_empty() {
+        (Constraint::Min(3), Constraint::Length(3))
+    } else {
+        (Constraint::Length(declared_h), Constraint::Min(3))
+    };
+
+    // Order top→bottom: Servers, Vhosts, Parked (one expands/scrolls), PHP,
+    // Services, then a context-aware key bar and a status/message line.
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),          // title
             Constraint::Length(servers_h),  // servers
-            Constraint::Min(3),             // vhosts
+            vhosts_c,                       // declared vhosts
+            parked_c,                       // parked sites
             Constraint::Length(php_h),      // php
             Constraint::Length(services_h), // services
             Constraint::Length(1),          // key bar
@@ -36,11 +47,49 @@ pub fn render(f: &mut Frame, app: &App) {
 
     render_title(f, app, chunks[0]);
     render_servers(f, app, chunks[1]);
-    render_vhosts(f, app, chunks[2]);
-    render_php(f, app, chunks[3]);
-    render_services(f, app, chunks[4]);
-    render_keys(f, app, chunks[5]);
-    render_status(f, app, chunks[6]);
+    let vhost_off = render_vhosts(f, app, chunks[2]);
+    let parked_off = render_parked(f, app, chunks[3]);
+    render_php(f, app, chunks[4]);
+    render_services(f, app, chunks[5]);
+    render_keys(f, app, chunks[6]);
+    render_status(f, app, chunks[7]);
+
+    // Record each panel's geometry so the mouse handler can map clicks/wheel
+    // back to a panel + row (offset = first visible row index).
+    {
+        let mut hits = app.hit_rects.borrow_mut();
+        hits.clear();
+        hits.push(PanelHit {
+            panel: Panel::Servers,
+            rect: chunks[1],
+            offset: 0,
+            len: app.state.servers.len(),
+        });
+        hits.push(PanelHit {
+            panel: Panel::Vhosts,
+            rect: chunks[2],
+            offset: vhost_off,
+            len: app.state.vhosts.len(),
+        });
+        hits.push(PanelHit {
+            panel: Panel::Parked,
+            rect: chunks[3],
+            offset: parked_off,
+            len: app.parked_vhosts.len(),
+        });
+        hits.push(PanelHit {
+            panel: Panel::Php,
+            rect: chunks[4],
+            offset: 0,
+            len: app.state.php_versions.len(),
+        });
+        hits.push(PanelHit {
+            panel: Panel::Services,
+            rect: chunks[5],
+            offset: 0,
+            len: app.state.services.len(),
+        });
+    }
 
     if app.wizard.is_some() {
         render_wizard(f, app);
@@ -534,6 +583,14 @@ fn render_keys(f: &mut Frame, app: &App, area: Rect) {
             ("a", "apply"),
             ("v", "validate"),
             ("L", "log"),
+            ("q", "quit"),
+        ],
+        Panel::Parked => &[
+            ("↑↓/scroll", "browse"),
+            ("PgUp/Dn", "page"),
+            ("p", "manage parks"),
+            ("L", "log"),
+            ("r", "apply"),
             ("q", "quit"),
         ],
         Panel::Php => &[
@@ -1157,16 +1214,33 @@ pub fn vhost_url(app: &App, vhost: &crate::state::Vhost) -> String {
     }
 }
 
-fn render_vhosts(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+/// First visible row index for a list of `len` rows in a `view_h`-tall panel,
+/// chosen to keep `sel` on screen (centered when scrolling is needed). Returns
+/// 0 when everything fits.
+fn window_offset(sel: usize, len: usize, view_h: usize) -> usize {
+    let view_h = view_h.max(1);
+    if len <= view_h {
+        return 0;
+    }
+    let half = view_h / 2;
+    sel.saturating_sub(half).min(len - view_h)
+}
+
+/// Render the declared vhosts (scrolling to keep the selection visible) and
+/// return the first visible row index for mouse hit-testing.
+fn render_vhosts(f: &mut Frame, app: &App, area: ratatui::layout::Rect) -> usize {
     let focused = app.focus == Panel::Vhosts;
+    let view_h = area.height.saturating_sub(2) as usize;
+    let len = app.state.vhosts.len();
+    let off = window_offset(app.sel_vhost, len, view_h);
     let mut lines: Vec<Line> = Vec::new();
-    if app.state.vhosts.is_empty() && app.parked_vhosts.is_empty() {
+    if len == 0 {
         lines.push(Line::from(Span::styled(
             "  no vhosts — press 'n' to create one",
             Style::default().fg(Color::DarkGray),
         )));
     }
-    for (i, v) in app.state.vhosts.iter().enumerate() {
+    for (i, v) in app.state.vhosts.iter().enumerate().skip(off).take(view_h) {
         let sel = i == app.sel_vhost;
         let url = vhost_url(app, v);
         // The URL is plain text so iTerm2/Ghostty auto-linkify it for cmd-click.
@@ -1187,17 +1261,6 @@ fn render_vhosts(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             .style(row_style(sel, focused)),
         );
     }
-    // Parked sites are derived (read-only): shown dimmed below declared vhosts.
-    for v in &app.parked_vhosts {
-        let scheme = if v.ssl { "https" } else { "http" };
-        lines.push(Line::from(Span::styled(
-            format!(
-                "   {scheme}://{:<27} {:<8} {:<5} {}  (parked)",
-                v.server_name, v.server, v.php_version, v.docroot
-            ),
-            Style::default().fg(Color::DarkGray),
-        )));
-    }
     let cols = ["host", "server", "php", "path"];
     let arrow = if app.vhost_sort_asc { "▲" } else { "▼" };
     let title = format!(
@@ -1209,6 +1272,56 @@ fn render_vhosts(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         Paragraph::new(lines).block(panel_block(&title, focused)),
         area,
     );
+    off
+}
+
+/// Render the parked sites (derived from `state.parks`) as their own scrollable
+/// panel. Read-only — selection is for inspection/scrolling. Returns the first
+/// visible row index for mouse hit-testing.
+fn render_parked(f: &mut Frame, app: &App, area: ratatui::layout::Rect) -> usize {
+    let focused = app.focus == Panel::Parked;
+    let view_h = area.height.saturating_sub(2) as usize;
+    let len = app.parked_vhosts.len();
+    let off = window_offset(app.sel_parked, len, view_h);
+    let mut lines: Vec<Line> = Vec::new();
+    if len == 0 {
+        lines.push(Line::from(Span::styled(
+            "  no parked directories — press 'p' to park one (e.g. ~/Sites → *.test)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    for (i, v) in app.parked_vhosts.iter().enumerate().skip(off).take(view_h) {
+        let sel = i == app.sel_parked;
+        let scheme = if v.ssl { "https" } else { "http" };
+        let url = format!("{scheme}://{}", v.server_name);
+        lines.push(
+            Line::from(vec![
+                Span::raw(format!(" {} ", if sel && focused { "›" } else { " " })),
+                Span::styled(
+                    format!("{url:<30}"),
+                    Style::default()
+                        .fg(ACCENT)
+                        .add_modifier(Modifier::UNDERLINED),
+                ),
+                Span::raw(format!(
+                    " {:<8} {:<5} {}",
+                    v.server, v.php_version, v.docroot
+                )),
+            ])
+            .style(row_style(sel, focused)),
+        );
+    }
+    // Show the window position when the list is taller than the panel.
+    let title = if len > view_h {
+        format!("Parked  ({len})  [{}–{} of {len}]", off + 1, off + view_h)
+    } else {
+        format!("Parked  ({len})")
+    };
+    f.render_widget(
+        Paragraph::new(lines).block(panel_block(&title, focused)),
+        area,
+    );
+    off
 }
 
 fn render_status(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
