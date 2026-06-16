@@ -255,6 +255,13 @@ fn build_fpm_conf(php: &PhpVersion) -> Result<String> {
 
     // Tunable directives, grouped by where they land.
     for def in php_settings_defs() {
+        // `opcache.enable` is a startup-only directive: emitting it as a
+        // per-request `php_admin_value` makes PHP warn "Zend OPcache can't be
+        // temporary enabled" on every request. It's passed as a `-d` startup
+        // define instead (see `fpm_define_args`).
+        if def.key == "opcache.enable" {
+            continue;
+        }
         let val = php.setting(def.key, def.default);
         match def.kind {
             PhpSettingKind::Pool => conf.push_str(&format!("{} = {}\n", def.key, val)),
@@ -277,21 +284,40 @@ fn build_fpm_conf(php: &PhpVersion) -> Result<String> {
         c = c,
     ));
 
-    // Xdebug: always pin the mode so an installed Xdebug is neutralized when
-    // off; add the debugger client port + auto-trigger when active.
-    conf.push_str(&format!(
-        "php_admin_value[xdebug.mode] = {}\n",
-        php.xdebug.as_str()
-    ));
-    if !php.xdebug.is_off() {
-        conf.push_str(&format!(
-            "php_admin_value[xdebug.client_port] = {}\n\
-             php_admin_flag[xdebug.start_with_request] = on\n",
-            php.xdebug_port
-        ));
-    }
+    // NB: Xdebug and `opcache.enable` are NOT written here. `xdebug.mode` and
+    // `opcache.enable` are PHP_INI_SYSTEM startup directives, and some Homebrew
+    // conf.d files hard-set `xdebug.mode=debug`; a pool `php_admin_value` does
+    // not reliably override a zend_extension's startup mode, leaving Xdebug
+    // actively instrumenting every call (5-50x slower for Twig/Grav). They are
+    // forced on the FPM command line via `fpm_define_args`, where they win.
 
     Ok(conf)
+}
+
+/// `-d key=value` startup defines for the php-fpm master. Used for directives
+/// that must be set at startup (and that conf.d files like `ext-xdebug.ini`
+/// otherwise hard-set): Xdebug's mode/port and `opcache.enable`. Passing these
+/// on the command line reliably overrides the scanned ini files, unlike a pool
+/// `php_admin_value`.
+fn fpm_define_args(php: &PhpVersion) -> Vec<String> {
+    let mut d = Vec::new();
+    // Default Xdebug fully off so an installed-but-idle Xdebug stops adding
+    // per-call overhead; when enabled, set the client port + auto-trigger too.
+    d.push("-d".into());
+    d.push(format!("xdebug.mode={}", php.xdebug.as_str()));
+    if !php.xdebug.is_off() {
+        d.push("-d".into());
+        d.push(format!("xdebug.client_port={}", php.xdebug_port));
+        d.push("-d".into());
+        d.push("xdebug.start_with_request=yes".into());
+    }
+    // opcache.enable as a startup define (avoids the per-request warning).
+    d.push("-d".into());
+    d.push(format!(
+        "opcache.enable={}",
+        php.setting("opcache.enable", "1")
+    ));
+    d
 }
 
 /// Stand up (or restart) the launchd-managed FPM master for a version, applying
@@ -307,16 +333,18 @@ pub fn ensure_fpm_running(brew: &Brew, php: &PhpVersion) -> Result<()> {
             formula(version)
         );
     }
+    let mut args = vec![
+        "--nodaemonize".into(),
+        "--fpm-config".into(),
+        conf.display().to_string(),
+        "-c".into(),
+        ini_dir(brew, version).display().to_string(),
+    ];
+    args.extend(fpm_define_args(php));
     let spec = ServiceSpec {
         service: service_id(version),
         program: bin,
-        args: vec![
-            "--nodaemonize".into(),
-            "--fpm-config".into(),
-            conf.display().to_string(),
-            "-c".into(),
-            ini_dir(brew, version).display().to_string(),
-        ],
+        args,
         log: launchd_log(version)?,
         keep_alive: true,
         run_at_load: true,
@@ -415,20 +443,37 @@ mod tests {
         assert!(conf.contains("pm.max_children = 10"));
         assert!(conf.contains("php_admin_value[memory_limit] = 256M"));
         assert!(conf.contains("php_admin_flag[display_errors] = on"));
-        // Xdebug off is still pinned so an installed Xdebug is neutralized.
-        assert!(conf.contains("php_admin_value[xdebug.mode] = off"));
-        assert!(!conf.contains("xdebug.client_port"));
+        // Xdebug and opcache.enable are startup defines, NOT pool values (a pool
+        // php_admin_value doesn't reliably override conf.d's xdebug.mode).
+        assert!(!conf.contains("xdebug.mode"));
+        assert!(!conf.contains("php_admin_value[opcache.enable]"));
+        assert_eq!(
+            fpm_define_args(&php),
+            vec!["-d", "xdebug.mode=off", "-d", "opcache.enable=1"]
+        );
 
-        // Overrides win; a pool directive and an admin value both flow through.
+        // Pool overrides still flow through the conf.
         php.settings.insert("pm.max_children".into(), "32".into());
         php.settings.insert("memory_limit".into(), "1G".into());
-        php.xdebug = XdebugMode::Debug;
-        php.xdebug_port = 9009;
         let conf = build_fpm_conf(&php).unwrap();
         assert!(conf.contains("pm.max_children = 32"));
         assert!(conf.contains("php_admin_value[memory_limit] = 1G"));
-        assert!(conf.contains("php_admin_value[xdebug.mode] = debug"));
-        assert!(conf.contains("php_admin_value[xdebug.client_port] = 9009"));
-        assert!(conf.contains("php_admin_flag[xdebug.start_with_request] = on"));
+
+        // Enabling Xdebug adds the port + auto-trigger to the startup defines.
+        php.xdebug = XdebugMode::Debug;
+        php.xdebug_port = 9009;
+        assert_eq!(
+            fpm_define_args(&php),
+            vec![
+                "-d",
+                "xdebug.mode=debug",
+                "-d",
+                "xdebug.client_port=9009",
+                "-d",
+                "xdebug.start_with_request=yes",
+                "-d",
+                "opcache.enable=1",
+            ]
+        );
     }
 }
