@@ -50,6 +50,11 @@ full TUI/CLI parity, and performance/correctness fixes.
   holds a target port, naming the holder instead of silently failing to bind.
 
 ### Fixed
+- **launchd jobs run at interactive QoS, not `Background`.** Every reeve service
+  plist set `ProcessType=Background`, which on Apple Silicon throttles the job
+  onto efficiency cores at low priority — making each PHP-FPM request 3–5× slower
+  than the same PHP under brew's (un-throttled) httpd. A Grav admin dashboard
+  load went from ~5.5s to ~0.5s after switching to `ProcessType=Interactive`.
 - **Apache HTTP keep-alive** is now enabled (`KeepAlive On` + tunable
   `KeepAliveTimeout` / `MaxKeepAliveRequests`). reeve builds Apache's config
   from scratch, where keep-alive was effectively off, so a browser opened a

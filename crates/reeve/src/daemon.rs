@@ -75,6 +75,11 @@ fn render_plist(spec: &ServiceSpec) -> String {
     let run_at_load = if spec.run_at_load { "true" } else { "false" };
     let log = xml_escape(&spec.log.display().to_string());
 
+    // ProcessType=Interactive, NOT Background. On Apple Silicon, launchd's
+    // Background type throttles the job onto efficiency cores at low QoS — for
+    // PHP-FPM that made every request 3-5x slower than the same PHP under brew's
+    // (un-throttled) httpd. reeve's services sit in the active dev request path,
+    // so they must run at interactive priority on the performance cores.
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -92,7 +97,7 @@ fn render_plist(spec: &ServiceSpec) -> String {
     <key>StandardErrorPath</key>
     <string>{log}</string>
     <key>ProcessType</key>
-    <string>Background</string>
+    <string>Interactive</string>
 </dict>
 </plist>
 "#
