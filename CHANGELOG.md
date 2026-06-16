@@ -58,7 +58,19 @@ full TUI/CLI parity, and performance/correctness fixes.
   preflight that refuses to launch when a process reeve doesn't manage already
   holds a target port, naming the holder instead of silently failing to bind.
 
+### Changed
+- **Consistent TUI shortcuts**: `r` = restart, `x` = stop, and `R`/`Del` =
+  remove in *every* panel (previously `r` removed in the PHP/Vhosts panels and
+  `x` toggled Xdebug). Xdebug moved to `X`. Editing/adding/removing a vhost now
+  auto-applies (re-renders + restarts the running servers) instead of asking you
+  to restart the server by hand.
+- **Sortable Vhosts panel**: keys `1`-`4` sort by host/server/php/path, pressing
+  the same column again flips direction. Installed PHP versions list ascending
+  (7.3, 8.3, 8.4, …) rather than in install order.
+
 ### Fixed
+- `apply` now reconciles **every** PHP-FPM master (not just whichever was last
+  touched), so launchd/plist changes propagate to all installed versions.
 - **launchd jobs run at interactive QoS, not `Background`.** Every reeve service
   plist set `ProcessType=Background`, which on Apple Silicon throttles the job
   onto efficiency cores at low priority — making each PHP-FPM request 3–5× slower
