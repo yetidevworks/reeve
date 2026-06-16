@@ -511,8 +511,10 @@ impl App {
             return;
         }
         match ev.kind {
-            MouseEventKind::ScrollDown => self.scroll_at(ev.column, ev.row, 3),
-            MouseEventKind::ScrollUp => self.scroll_at(ev.column, ev.row, -3),
+            // One row per wheel notch — a larger step skips rows in short lists
+            // (trackpads emit many events per gesture, so this still feels fast).
+            MouseEventKind::ScrollDown => self.scroll_at(ev.column, ev.row, 1),
+            MouseEventKind::ScrollUp => self.scroll_at(ev.column, ev.row, -1),
             MouseEventKind::Down(MouseButton::Left) => self.click_at(ev.column, ev.row),
             _ => {}
         }
@@ -534,9 +536,10 @@ impl App {
         if hit.panel == Panel::Php || hit.len == 0 {
             return;
         }
-        // Content starts one row below the panel's top border.
+        // Content starts on the row just below the top border, so the first row
+        // sits *at* content_top — use >= or the first item is unclickable.
         let content_top = hit.rect.y + 1;
-        if row > content_top {
+        if row >= content_top {
             let visible = (row - content_top) as usize;
             let idx = hit.offset + visible;
             if idx < hit.len {
