@@ -96,19 +96,88 @@ pub fn serve_state(server: &Server) -> ServeState {
     }
 }
 
-/// Refuse to start a server when a process reeve doesn't manage already holds
-/// one of its ports — the launchd job would load but silently fail to bind.
-fn preflight_ports(server: &Server) -> Result<()> {
+/// Outcome of starting a server/service: the resulting launchd status, plus an
+/// optional note when reeve first had to stop a conflicting `brew services`
+/// instance of the same software to free the port.
+pub struct Started {
+    pub status: Status,
+    pub handoff: Option<String>,
+}
+
+/// When a port reeve needs is held by a foreign process, and Homebrew is
+/// running its own copy of `formula` as a `brew services` job, stop that job so
+/// reeve can take over. Returns a note when it stopped one. Best-effort — a
+/// manually-launched (non-brew) process is left for the caller to report.
+fn reclaim_from_brew(brew: &Brew, formula: &str) -> Option<String> {
+    if !brew.service_started(formula) {
+        return None;
+    }
+    brew.stop_service(formula).ok().map(|()| {
+        format!("stopped Homebrew's own '{formula}' (brew services) so reeve can manage it")
+    })
+}
+
+/// Poll briefly for `ports` to come free after stopping a conflicting job — the
+/// LISTEN socket usually goes the instant the process dies, but `brew services
+/// stop` returns slightly before launchd has fully reaped it.
+fn wait_port_release(ports: &[u16], our: Option<u32>) {
+    for _ in 0..20 {
+        if probe::first_foreign(ports, our).is_none() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// Clear the way for a server to bind: if a foreign process holds one of its
+/// ports, try to hand off from a `brew services` copy of the same backend;
+/// error only if an unmanaged process still holds the port afterward. Returns a
+/// note describing any handoff.
+fn preflight_ports(server: &Server) -> Result<Option<String>> {
     let id = server_service_id(server);
     let our = daemon::pid(&id);
     let state = load_state().unwrap_or_default();
-    if let Some((port, pid, name)) = probe::first_foreign(&ports_to_bind(server, &state), our) {
+    let ports = ports_to_bind(server, &state);
+    if probe::first_foreign(&ports, our).is_none() {
+        return Ok(None);
+    }
+    let mut note = None;
+    if let Ok(brew) = Brew::detect() {
+        note = reclaim_from_brew(&brew, backend_for(server.backend).formula());
+        if note.is_some() {
+            wait_port_release(&ports, our);
+        }
+    }
+    if let Some((port, pid, name)) = probe::first_foreign(&ports, our) {
         bail!(
             "Port {port} is already in use by '{name}' (pid {pid}), which reeve doesn't manage. \
              Stop it (e.g. `brew services stop {name}`) or change this server's port, then retry."
         );
     }
-    Ok(())
+    Ok(note)
+}
+
+/// Same handoff as [`preflight_ports`], for a managed service's single port.
+fn preflight_service(kind: ServiceKind) -> Result<Option<String>> {
+    let port = services::port(kind);
+    let our = daemon::pid(&services::service_id(kind));
+    if probe::first_foreign(&[port], our).is_none() {
+        return Ok(None);
+    }
+    let mut note = None;
+    if let Ok(brew) = Brew::detect() {
+        note = reclaim_from_brew(&brew, services::formula(kind));
+        if note.is_some() {
+            wait_port_release(&[port], our);
+        }
+    }
+    if let Some((port, pid, name)) = probe::first_foreign(&[port], our) {
+        bail!(
+            "Port {port} is already in use by '{name}' (pid {pid}), which reeve doesn't manage. \
+             Stop it (e.g. `brew services stop {name}`), then retry."
+        );
+    }
+    Ok(note)
 }
 
 /// Flip a server's enabled flag and persist.
@@ -151,9 +220,9 @@ pub fn render_server(server: &Server) -> Result<()> {
 }
 
 /// Render, install the launchd service, and (re)start a server. Marks enabled.
-pub fn start_server(name: &str) -> Result<Status> {
+pub fn start_server(name: &str) -> Result<Started> {
     let server = require_server(name)?;
-    preflight_ports(&server)?;
+    let handoff = preflight_ports(&server)?;
     render_server(&server)?;
     let brew = Brew::detect()?;
     let backend = backend_for(server.backend);
@@ -161,7 +230,10 @@ pub fn start_server(name: &str) -> Result<Status> {
     daemon::install(&spec)?;
     daemon::restart(&server_service_id(&server))?;
     set_enabled(name, true)?;
-    Ok(daemon::status(&server_service_id(&server)))
+    Ok(Started {
+        status: daemon::status(&server_service_id(&server)),
+        handoff,
+    })
 }
 
 /// Stop a server and mark it disabled.
@@ -292,9 +364,12 @@ pub fn add_service(kind: ServiceKind) -> Result<()> {
 /// Ensure a service is installed, stand up its launchd master, and mark it
 /// enabled. Registers it in state first if absent. Slow when a brew install
 /// is needed.
-pub fn start_service(kind: ServiceKind) -> Result<Status> {
+pub fn start_service(kind: ServiceKind) -> Result<Started> {
     let brew = Brew::detect()?;
     services::ensure_installed(&brew, kind)?;
+    // A leftover `brew services` copy (e.g. `brew services start redis`) would
+    // hold the port and make reeve's foreground master crash-loop; hand off.
+    let handoff = preflight_service(kind)?;
     let spec = services::service_spec(&brew, kind)?;
     daemon::install(&spec)?;
     daemon::restart(&services::service_id(kind))?;
@@ -307,7 +382,10 @@ pub fn start_service(kind: ServiceKind) -> Result<Status> {
         }),
     }
     save_state(&state)?;
-    Ok(daemon::status(&services::service_id(kind)))
+    Ok(Started {
+        status: daemon::status(&services::service_id(kind)),
+        handoff,
+    })
 }
 
 /// Stop a service's launchd master and mark it disabled.
@@ -323,6 +401,7 @@ pub fn stop_service(kind: ServiceKind) -> Result<()> {
 /// Restart a service's launchd master (re-installs the spec first).
 pub fn restart_service(kind: ServiceKind) -> Result<Status> {
     let brew = Brew::detect()?;
+    preflight_service(kind)?;
     let spec = services::service_spec(&brew, kind)?;
     daemon::install(&spec)?;
     daemon::restart(&services::service_id(kind))?;
@@ -385,6 +464,8 @@ pub fn set_default_php(version: &str) -> Result<()> {
 /// Re-render and restart a running server (picks up config changes).
 pub fn restart_server(name: &str) -> Result<Status> {
     let server = require_server(name)?;
+    // Reclaim the port from a brew-services copy if one is squatting on it; the
+    // handoff note isn't surfaced on restart (start is the primary path).
     preflight_ports(&server)?;
     render_server(&server)?;
     let brew = Brew::detect()?;

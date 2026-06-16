@@ -350,7 +350,7 @@ fn render_log_modal(f: &mut Frame, app: &App) {
         )));
     }
     for l in &m.lines[scroll..end] {
-        lines.push(Line::from(Span::raw(l.clone())));
+        lines.push(Line::from(Span::raw(app.anon(l))));
     }
     lines.push(Line::from(Span::styled(
         format!(
@@ -1136,7 +1136,7 @@ fn render_doctor_modal(f: &mut Frame, app: &App) {
         };
         lines.push(Line::from(vec![
             Span::styled(format!(" {} ", health.symbol()), Style::default().fg(color)),
-            Span::raw(text.clone()),
+            Span::raw(app.anon(text)),
         ]));
     }
     lines.push(Line::from(Span::styled(
@@ -1255,7 +1255,9 @@ fn render_vhosts(f: &mut Frame, app: &App, area: ratatui::layout::Rect) -> usize
                 ),
                 Span::raw(format!(
                     " {:<8} {:<5} {}",
-                    v.server, v.php_version, v.docroot
+                    v.server,
+                    v.php_version,
+                    app.anon(&v.docroot)
                 )),
             ])
             .style(row_style(sel, focused)),
@@ -1305,7 +1307,9 @@ fn render_parked(f: &mut Frame, app: &App, area: ratatui::layout::Rect) -> usize
                 ),
                 Span::raw(format!(
                     " {:<8} {:<5} {}",
-                    v.server, v.php_version, v.docroot
+                    v.server,
+                    v.php_version,
+                    app.anon(&v.docroot)
                 )),
             ])
             .style(row_style(sel, focused)),
@@ -1327,7 +1331,7 @@ fn render_parked(f: &mut Frame, app: &App, area: ratatui::layout::Rect) -> usize
 fn render_status(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     f.render_widget(
         Paragraph::new(Span::styled(
-            format!(" {}", app.message),
+            format!(" {}", app.anon(&app.message)),
             Style::default().fg(Color::Gray),
         ))
         .alignment(Alignment::Left),

@@ -15,7 +15,7 @@ versions**, SSL, and DNS — from one CLI and TUI.
 Written in Rust. It does not bundle servers or PHP; it orchestrates
 Homebrew-installed ones and manages them as your-user launchd services (no sudo).
 
-![reeve](screenshot.webp)
+![reeve](screenshot.png)
 
 ## Why
 

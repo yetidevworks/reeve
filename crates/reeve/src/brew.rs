@@ -112,6 +112,44 @@ impl Brew {
         Ok(())
     }
 
+    /// Is Homebrew running `formula` as its own `brew services` job? Parses
+    /// `brew services list`. Best-effort — returns false on any error. Only
+    /// called when reeve has already detected a port conflict, so the (slowish)
+    /// `brew services list` never runs on the happy path.
+    pub fn service_started(&self, formula: &str) -> bool {
+        let Ok(out) = Command::new(self.brew_bin())
+            .args(["services", "list"])
+            .output()
+        else {
+            return false;
+        };
+        if !out.status.success() {
+            return false;
+        }
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let mut cols = line.split_whitespace();
+            if cols.next() == Some(formula) {
+                // Second column is the status (started / scheduled / none / …).
+                return matches!(cols.next(), Some("started") | Some("scheduled"));
+            }
+        }
+        false
+    }
+
+    /// Stop a `brew services` job (`brew services stop <formula>`). Output is
+    /// captured (not streamed) so it never disturbs the TUI's alternate screen;
+    /// callers report the handoff themselves.
+    pub fn stop_service(&self, formula: &str) -> Result<()> {
+        let out = Command::new(self.brew_bin())
+            .args(["services", "stop", formula])
+            .output()
+            .with_context(|| format!("Failed to spawn `brew services stop {formula}`"))?;
+        if !out.status.success() {
+            bail!("`brew services stop {formula}` failed");
+        }
+        Ok(())
+    }
+
     /// Trust a third-party tap (`brew trust <tap>`). Newer Homebrew refuses to
     /// load formulae from untrusted taps without this. Best-effort: older
     /// Homebrew has no `trust` subcommand, so a failure here is not fatal.

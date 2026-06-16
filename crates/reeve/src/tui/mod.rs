@@ -65,6 +65,12 @@ pub struct App {
     /// Panel rects from the last render, for mouse hit-testing. Interior
     /// mutability because `ui::render` takes `&App`.
     pub hit_rects: RefCell<Vec<PanelHit>>,
+    /// Secret screenshot helper: when on, displayed paths have the real home
+    /// dir rewritten to `/Users/andy` so they don't leak the username. Toggled
+    /// with `~` (deliberately absent from the key bar).
+    pub anonymize: bool,
+    /// The real home path to rewrite when anonymizing (e.g. `/Users/rhuk`).
+    pub anon_home: Option<String>,
     pub server_status: Vec<crate::ops::ServeState>,
     pub php_status: Vec<Status>,
     pub service_status: Vec<Status>,
@@ -323,6 +329,8 @@ impl App {
             sel_service: 0,
             sel_parked: 0,
             hit_rects: RefCell::new(Vec::new()),
+            anonymize: false,
+            anon_home: std::env::var("HOME").ok().filter(|h| !h.is_empty()),
             server_status: Vec::new(),
             php_status: Vec::new(),
             service_status: Vec::new(),
@@ -574,6 +582,15 @@ impl App {
         self.refresh();
     }
 
+    /// Rewrite the real home path to a generic one when the anonymizer is on,
+    /// so screenshots don't leak the username. No-op otherwise.
+    pub fn anon(&self, s: &str) -> String {
+        match (self.anonymize, &self.anon_home) {
+            (true, Some(home)) => s.replace(home.as_str(), "/Users/andy"),
+            _ => s.to_string(),
+        }
+    }
+
     fn selected_server_name(&self) -> Option<String> {
         self.state
             .servers
@@ -620,6 +637,7 @@ pub fn snapshot(width: u16, height: u16, modal: &str) -> Result<String> {
         "service" => app.service_picker = Some(ServicePicker { sel: 0 }),
         "park" => open_park_modal(&mut app),
         "doctor" => open_doctor(&mut app),
+        "anon" => app.anonymize = true,
         "config" => open_config_modal(&mut app),
         "log" => {
             app.log_modal = Some(LogModal {
@@ -876,6 +894,16 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             app.sort_vhosts();
         }
         KeyCode::Char('L') => open_log(app),
+        // Secret screenshot anonymizer (not advertised in the key bar): toggle
+        // rewriting the real home path to /Users/andy in displayed paths.
+        KeyCode::Char('~') => {
+            app.anonymize = !app.anonymize;
+            app.message = if app.anonymize {
+                "anonymizer on — paths show /Users/andy".into()
+            } else {
+                "anonymizer off".into()
+            };
+        }
         KeyCode::Char('?') => open_doctor(app),
         KeyCode::Char('T') => {
             app.message = "installing mkcert CA into the trust store…".into();
@@ -1791,6 +1819,13 @@ fn restart_selected_fpm(app: &mut App) {
 
 /// Start the selected server. If its backend's brew formula isn't installed yet,
 /// defer to the suspended runner so the (slow) install output is visible.
+/// Format a successful start, prefixing any brew-services handoff note so the
+/// user sees that reeve stopped a conflicting Homebrew copy.
+fn fmt_started(label: &str, out: ops::Started) -> String {
+    let pre = out.handoff.map(|n| format!("{n}; ")).unwrap_or_default();
+    format!("{pre}started {label} — {}", out.status.as_str())
+}
+
 fn start_selected_server(app: &mut App) {
     let Some(name) = app.selected_server_name() else {
         return;
@@ -1802,7 +1837,7 @@ fn start_selected_server(app: &mut App) {
         .and_then(|formula| Brew::detect().ok().map(|brew| brew.is_installed(formula)))
         .unwrap_or(false);
     if installed {
-        let r = ops::start_server(&name).map(|st| format!("started '{name}' — {}", st.as_str()));
+        let r = ops::start_server(&name).map(|o| fmt_started(&format!("'{name}'"), o));
         app.act("start", r);
     } else {
         app.pending_server = Some(name);
@@ -1820,7 +1855,7 @@ fn start_selected_service(app: &mut App) {
         .map(|b| crate::services::is_installed(&b, kind))
         .unwrap_or(false);
     if installed {
-        let r = ops::start_service(kind).map(|st| format!("started '{kind}' — {}", st.as_str()));
+        let r = ops::start_service(kind).map(|o| fmt_started(&format!("'{kind}'"), o));
         app.act("start", r);
     } else {
         app.pending_service = Some(kind);
@@ -1848,8 +1883,7 @@ fn handle_service_picker_key(app: &mut App, code: KeyCode) {
                 .map(|b| crate::services::is_installed(&b, kind))
                 .unwrap_or(false);
             if installed {
-                let r = ops::start_service(kind)
-                    .map(|st| format!("started '{kind}' — {}", st.as_str()));
+                let r = ops::start_service(kind).map(|o| fmt_started(&format!("'{kind}'"), o));
                 app.act("start", r);
             } else {
                 app.pending_service = Some(kind);
@@ -2374,7 +2408,15 @@ fn run_server_start_suspended(
     println!("\n── Installing backend + starting '{name}' ──\n");
     let result = ops::start_server(name);
     match &result {
-        Ok(st) => println!("\n✓ '{name}' — {}. Press any key to return…", st.as_str()),
+        Ok(o) => {
+            if let Some(note) = &o.handoff {
+                println!("  ↪ {note}");
+            }
+            println!(
+                "\n✓ '{name}' — {}. Press any key to return…",
+                o.status.as_str()
+            );
+        }
         Err(e) => println!("\n✗ {e}\nPress any key to return…"),
     }
     let _ = enable_raw_mode();
@@ -2390,7 +2432,7 @@ fn run_server_start_suspended(
     let _ = disable_raw_mode();
     *terminal = setup_terminal()?;
     app.message = match result {
-        Ok(st) => format!("✓ '{name}' — {}", st.as_str()),
+        Ok(o) => format!("✓ {}", fmt_started(&format!("'{name}'"), o)),
         Err(e) => format!("✗ {name}: {e}"),
     };
     app.refresh();
@@ -2408,7 +2450,15 @@ fn run_service_start_suspended(
     println!("\n── Installing + starting {kind} ──\n");
     let result = ops::start_service(kind);
     match &result {
-        Ok(st) => println!("\n✓ {kind} — {}. Press any key to return…", st.as_str()),
+        Ok(o) => {
+            if let Some(note) = &o.handoff {
+                println!("  ↪ {note}");
+            }
+            println!(
+                "\n✓ {kind} — {}. Press any key to return…",
+                o.status.as_str()
+            );
+        }
         Err(e) => println!("\n✗ {e}\nPress any key to return…"),
     }
     let _ = enable_raw_mode();
@@ -2424,7 +2474,7 @@ fn run_service_start_suspended(
     let _ = disable_raw_mode();
     *terminal = setup_terminal()?;
     app.message = match result {
-        Ok(st) => format!("✓ {kind} — {}", st.as_str()),
+        Ok(o) => format!("✓ {}", fmt_started(&format!("'{kind}'"), o)),
         Err(e) => format!("✗ {kind}: {e}"),
     };
     app.refresh();

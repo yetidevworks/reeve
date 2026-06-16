@@ -2,7 +2,7 @@
 
 All notable changes to reeve are documented here.
 
-## 0.2.0 (unreleased)
+## 0.2.0
 
 Stack expansion (databases/services, PHP tuning, presets, parking),
 full TUI/CLI parity, and performance/correctness fixes.
@@ -56,6 +56,11 @@ full TUI/CLI parity, and performance/correctness fixes.
 - **Full TUI/CLI parity**: the new-vhost wizard gained a reverse-proxy field, a
   park manager (`p`) handles add/remove, `?` opens the full `doctor` report, and
   `T` runs `ssl trust` — so everything the CLI can do is reachable in the TUI.
+- **Secret path anonymizer** (`~` in the TUI, intentionally absent from the key
+  bar): rewrites your real home directory to `/Users/andy` in every displayed
+  path — Vhosts/Parked docroots, the status line, the log viewer, and the
+  `doctor` report — so screenshots don't leak your username. Editable fields are
+  left untouched.
 - **Honest, port-aware server status**: `server list`, `doctor`, and the TUI
   server panel now report what launchd *and* the network agree on — `running`
   only when the port is actually bound, otherwise `loaded, not bound`,
@@ -74,6 +79,14 @@ full TUI/CLI parity, and performance/correctness fixes.
   (7.3, 8.3, 8.4, …) rather than in install order.
 
 ### Fixed
+- **Auto-hand off from `brew services`**: when a server or service starts and a
+  conflicting `brew services` instance of the same software (e.g. a leftover
+  `brew services start redis`/`httpd`) is holding the port, reeve now stops that
+  job and reports the handoff, instead of crash-looping on the held port. A
+  hand-launched (non-brew) process still yields the clear "port held by …" error.
+- **Parked folders with awkward names** are slugified into valid hostnames — a
+  folder literally named `grav-helios 2` becomes `grav-helios-2.test` instead of
+  producing an invalid host that mkcert rejects and aborts the whole `apply`.
 - `apply` now reconciles **every** PHP-FPM master (not just whichever was last
   touched), so launchd/plist changes propagate to all installed versions.
 - **launchd jobs run at interactive QoS, not `Background`.** Every reeve service

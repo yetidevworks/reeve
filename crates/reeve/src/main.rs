@@ -401,8 +401,11 @@ fn cmd_server(c: ServerCommands) -> Result<()> {
             Ok(())
         }
         ServerCommands::Start { name } => {
-            let status = ops::start_server(&name)?;
-            println!("✓ Started '{name}' — {}", status.as_str());
+            let out = ops::start_server(&name)?;
+            if let Some(note) = &out.handoff {
+                println!("  ↪ {note}");
+            }
+            println!("✓ Started '{name}' — {}", out.status.as_str());
             Ok(())
         }
         ServerCommands::Stop { name } => {
@@ -490,11 +493,14 @@ fn cmd_service(c: ServiceCommands) -> Result<()> {
         ServiceCommands::Start { kind } => {
             brew::Brew::detect_or_offer_install()?;
             let kind = ServiceKind::from_str(&kind)?;
-            let status = ops::start_service(kind)?;
+            let out = ops::start_service(kind)?;
+            if let Some(note) = &out.handoff {
+                println!("  ↪ {note}");
+            }
             println!(
                 "✓ Started '{kind}' on :{} — {}",
                 services::port(kind),
-                status.as_str()
+                out.status.as_str()
             );
             Ok(())
         }
