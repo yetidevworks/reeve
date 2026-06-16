@@ -37,6 +37,40 @@ fn detect_framework(dir: &Path) -> Framework {
     Framework::Generic
 }
 
+/// Convert a folder name into a DNS-safe host label (the bit before the TLD).
+/// Lowercases, keeps letters/digits/`.`, turns any other character (spaces,
+/// underscores, …) into `-`, collapses repeated separators, and trims them off
+/// the ends. Returns `None` when nothing valid is left, so the folder is
+/// skipped rather than producing a hostname mkcert and the webserver reject
+/// (e.g. a folder literally named `grav-helios 2` → `grav-helios-2`).
+fn host_label(name: &str) -> Option<String> {
+    let mut out = String::with_capacity(name.len());
+    let mut prev_sep = true; // leading-separator guard
+    for ch in name.chars() {
+        let c = ch.to_ascii_lowercase();
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+            prev_sep = false;
+        } else if c == '.' {
+            if !prev_sep {
+                out.push('.');
+                prev_sep = true;
+            }
+        } else if !prev_sep {
+            out.push('-');
+            prev_sep = true;
+        }
+    }
+    while out.ends_with('-') || out.ends_with('.') {
+        out.pop();
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
 /// True if a directory has any web content worth serving (an index file in the
 /// root or in a conventional public subdir).
 fn is_web_project(dir: &Path) -> bool {
@@ -59,6 +93,7 @@ fn is_web_project(dir: &Path) -> bool {
 /// Expand one park into synthetic vhosts, one per servable subfolder.
 pub fn expand(park: &Park) -> Vec<Vhost> {
     let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     let Ok(entries) = fs::read_dir(&park.root) else {
         return out;
     };
@@ -77,8 +112,17 @@ pub fn expand(park: &Park) -> Vec<Vhost> {
         if !is_web_project(&path) {
             continue;
         }
+        // Skip names that can't form a valid hostname (rather than abort apply).
+        let Some(label) = host_label(name) else {
+            continue;
+        };
+        let server_name = format!("{label}.{}", park.tld);
+        // Two folders can sanitize to the same label — first one wins.
+        if !seen.insert(server_name.clone()) {
+            continue;
+        }
         out.push(Vhost {
-            server_name: format!("{}.{}", name.to_lowercase(), park.tld),
+            server_name,
             server: park.server.clone(),
             docroot: path.display().to_string(),
             php_version: park.php_version.clone(),
@@ -134,6 +178,20 @@ pub fn effective_vhosts_for(state: &State, server: &str) -> Vec<Vhost> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_label_sanitizes_and_skips() {
+        assert_eq!(
+            host_label("grav-helios 2").as_deref(),
+            Some("grav-helios-2")
+        );
+        assert_eq!(host_label("My_Project").as_deref(), Some("my-project"));
+        assert_eq!(host_label("admin.bak").as_deref(), Some("admin.bak"));
+        assert_eq!(host_label("  spaced  ").as_deref(), Some("spaced"));
+        assert_eq!(host_label("café").as_deref(), Some("caf")); // non-ascii dropped
+        assert_eq!(host_label("   ").as_deref(), None); // nothing valid → skip
+        assert_eq!(host_label("...").as_deref(), None);
+    }
 
     #[test]
     fn expand_picks_web_projects_and_detects_laravel() {
