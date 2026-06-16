@@ -199,7 +199,7 @@ The new-vhost wizard (`n` on Vhosts) covers framework **presets** and a
 | `validate` | Run every backend's native config test |
 | `logs [<target>] [-n N] [--follow]` | View or tail a service's log |
 | `doctor` | Diagnose the whole stack (brew, servers, FPM, services, DNS, certs, ports) |
-| `ssl mint <host>` / `ssl trust` / `ssl ca` | Local certificates |
+| `ssl mint <host>` / `ssl trust` / `ssl untrust` / `ssl status` / `ssl ca` | Local certificates: mint one, install/remove the mkcert CA in the trust store, or show its state |
 | `dns setup` / `dns status` | Wildcard `*.test` DNS |
 
 ## How it works

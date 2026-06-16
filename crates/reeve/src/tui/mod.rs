@@ -749,9 +749,15 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('?') => open_doctor(app),
         KeyCode::Char('T') => {
             app.message = "installing mkcert CA into the trust store…".into();
-            let r = Brew::detect()
-                .and_then(|brew| ssl::ensure_ca(&brew))
-                .map(|_| "mkcert CA installed — local HTTPS is now trusted".to_string());
+            let r = Brew::detect().and_then(|brew| ssl::ensure_ca(&brew)).map(|newly| {
+                if newly {
+                    "✓ mkcert CA installed — local HTTPS is now trusted (restart the browser)"
+                        .to_string()
+                } else {
+                    "✓ mkcert CA already trusted — local HTTPS works (System keychain + Firefox)"
+                        .to_string()
+                }
+            });
             app.act("ssl trust", r);
             // mkcert may pop an admin dialog — repaint to clear artifacts.
             app.force_clear = true;

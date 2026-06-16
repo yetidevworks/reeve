@@ -684,8 +684,34 @@ fn cmd_ssl(c: SslCommands) -> Result<()> {
             Ok(())
         }
         SslCommands::Trust => {
-            ssl::ensure_ca(&brew)?;
-            println!("✓ mkcert local CA installed into the trust store");
+            if ssl::ensure_ca(&brew)? {
+                println!(
+                    "✓ mkcert local CA installed into the trust store — local HTTPS is now trusted"
+                );
+            } else {
+                println!("✓ mkcert local CA was already trusted (System keychain + Firefox)");
+            }
+            Ok(())
+        }
+        SslCommands::Untrust => {
+            ssl::uninstall_ca(&brew)?;
+            println!("✓ mkcert local CA removed from the trust store (CA files kept on disk)");
+            Ok(())
+        }
+        SslCommands::Status => {
+            let root = ssl::caroot(&brew)?;
+            let generated = ssl::ca_cert(&brew).map(|p| p.exists()).unwrap_or(false);
+            let trusted = ssl::is_trusted(&brew);
+            println!("CA root:   {}", root.display());
+            println!("Generated: {}", if generated { "yes" } else { "no" });
+            println!(
+                "Trusted:   {}",
+                if trusted {
+                    "yes — browsers/curl trust local certs"
+                } else {
+                    "no — run `reeve ssl trust`"
+                }
+            );
             Ok(())
         }
         SslCommands::Ca => {

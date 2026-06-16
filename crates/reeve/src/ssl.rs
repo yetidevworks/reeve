@@ -43,20 +43,64 @@ pub fn ca_cert(brew: &Brew) -> Result<PathBuf> {
 
 /// Ensure mkcert's local CA exists and is installed into the trust store.
 /// `mkcert -install` is idempotent; on macOS the first run may prompt for
-/// admin authorization to add the root to the System keychain.
-pub fn ensure_ca(brew: &Brew) -> Result<()> {
+/// admin authorization to add the root to the System keychain. Output is
+/// captured (not inherited) so it never corrupts the TUI's alternate screen.
+/// Returns `true` if the CA was newly installed, `false` if it was already
+/// present in the trust store.
+pub fn ensure_ca(brew: &Brew) -> Result<bool> {
     ensure_installed(brew)?;
-    let status = Command::new(mkcert_bin(brew))
+    let out = Command::new(mkcert_bin(brew))
         .arg("-install")
-        .status()
+        .output()
         .context("Failed to run `mkcert -install`")?;
-    if !status.success() {
+    if !out.status.success() {
         bail!(
-            "`mkcert -install` failed. You may need to authorize adding the CA \
-             to your trust store, then re-run."
+            "`mkcert -install` failed: {}. You may need to authorize adding the \
+             CA to your trust store, then re-run.",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // mkcert says "already installed" when nothing changed.
+    Ok(!combined.contains("already installed"))
+}
+
+/// Remove the mkcert local CA from the trust store (`mkcert -uninstall`). Leaves
+/// the CA files on disk, so a later `trust` re-installs the same root.
+pub fn uninstall_ca(brew: &Brew) -> Result<()> {
+    let out = Command::new(mkcert_bin(brew))
+        .arg("-uninstall")
+        .output()
+        .context("Failed to run `mkcert -uninstall`")?;
+    if !out.status.success() {
+        bail!(
+            "`mkcert -uninstall` failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
         );
     }
     Ok(())
+}
+
+/// Whether the mkcert root CA is actually present in the macOS System keychain
+/// (not merely generated on disk) — the real "is local HTTPS trusted" check.
+pub fn is_trusted(brew: &Brew) -> bool {
+    // mkcert's CA common name is "mkcert <user>@<host> …"; find it by the
+    // stable "mkcert" prefix in the System keychain.
+    let _ = brew;
+    Command::new("security")
+        .args([
+            "find-certificate",
+            "-c",
+            "mkcert",
+            "/Library/Keychains/System.keychain",
+        ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 /// Certificate + key paths for a host (the convention the backends expect).

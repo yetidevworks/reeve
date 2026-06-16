@@ -215,23 +215,28 @@ pub fn run(brew: Option<&Brew>, cfg: &Config, state: &State) -> Vec<Check> {
         }
     }
 
-    // mkcert CA in the trust store.
-    let ca_present = brew
+    // mkcert CA: generated on disk AND actually in the trust store.
+    let generated = brew
         .and_then(|b| ssl::ca_cert(b).ok())
         .map(|p| p.exists())
         .unwrap_or(false);
-    if ca_present {
-        checks.push(Check::new(
+    let trusted = brew.map(ssl::is_trusted).unwrap_or(false);
+    match (generated, trusted) {
+        (_, true) => checks.push(Check::new(
             "SSL CA",
             Health::Ok,
-            "mkcert root present".to_string(),
-        ));
-    } else {
-        checks.push(Check::new(
+            "mkcert root trusted (local HTTPS works)".to_string(),
+        )),
+        (true, false) => checks.push(Check::new(
+            "SSL CA",
+            Health::Warn,
+            "generated but not trusted — run `reeve ssl trust` (TUI: T)".to_string(),
+        )),
+        (false, false) => checks.push(Check::new(
             "SSL CA",
             Health::Warn,
             "not installed — run `reeve ssl trust`".to_string(),
-        ));
+        )),
     }
 
     checks

@@ -229,6 +229,11 @@ pub enum SslCommands {
     /// Install the mkcert local CA into the system trust store (may prompt for
     /// admin authorization). Run once so browsers trust local certs.
     Trust,
+    /// Remove the mkcert local CA from the trust store (browsers stop trusting
+    /// local certs). The CA files stay on disk for a later `trust`.
+    Untrust,
+    /// Show whether the local CA is generated and trusted, and where it lives.
+    Status,
     /// Print the local CA root certificate path.
     Ca,
 }
