@@ -85,13 +85,6 @@ impl Nginx {
         let fastcgi_conf = etc.join("fastcgi.conf");
 
         for v in vhosts {
-            let php = state.get_php(&v.php_version).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "vhost '{}' references uninstalled PHP {}",
-                    v.server_name,
-                    v.php_version
-                )
-            })?;
             out.push_str("    server {\n");
             if v.ssl {
                 out.push_str(&format!("        listen {} ssl;\n", server.https_port));
@@ -109,9 +102,32 @@ impl Nginx {
                 out.push_str(&format!("        listen {};\n", server.http_port));
             }
             out.push_str(&format!("        server_name {};\n", v.server_name));
-            out.push_str(&format!("        root {};\n", q(&v.docroot)));
+            if let Some(target) = &v.proxy_target {
+                // Reverse-proxy vhost: forward everything upstream.
+                out.push_str("        location / {\n");
+                out.push_str(&format!("            proxy_pass {target};\n"));
+                out.push_str("            proxy_set_header Host $host;\n");
+                out.push_str(
+                    "            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n",
+                );
+                out.push_str("            proxy_set_header X-Forwarded-Proto $scheme;\n");
+                out.push_str("        }\n");
+                out.push_str("    }\n");
+                continue;
+            }
+            let php = state.get_php(&v.php_version).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "vhost '{}' references uninstalled PHP {}",
+                    v.server_name,
+                    v.php_version
+                )
+            })?;
+            out.push_str(&format!("        root {};\n", q(&v.effective_docroot())));
             out.push_str("        index index.php index.html;\n");
-            out.push_str("        location / { try_files $uri $uri/ /index.php?$query_string; }\n");
+            out.push_str(&format!(
+                "        location / {{ try_files {}; }}\n",
+                crate::preset::nginx_try_files(v.preset)
+            ));
             out.push_str("        location ~ \\.php$ {\n");
             out.push_str(&format!(
                 "            include {};\n",

@@ -31,29 +31,34 @@ impl Caddy {
         );
 
         for v in vhosts {
-            let php = state.get_php(&v.php_version).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "vhost '{}' references uninstalled PHP {}",
-                    v.server_name,
-                    v.php_version
-                )
-            })?;
             let scheme_port = if v.ssl {
                 format!("https://{}:{}", v.server_name, server.https_port)
             } else {
                 format!("http://{}:{}", v.server_name, server.http_port)
             };
             out.push_str(&format!("{scheme_port} {{\n"));
-            out.push_str(&format!("\troot * {}\n", quote(&v.docroot)));
-            out.push_str(&format!(
-                "\tphp_fastcgi {}\n",
-                quote(&format!("unix/{}", php.fpm_socket))
-            ));
-            out.push_str("\tfile_server\n");
-            out.push_str(&format!(
-                "\trequest_body {{\n\t\tmax_size {}\n\t}}\n",
-                server.setting("max_body", "100MB")
-            ));
+            if let Some(target) = &v.proxy_target {
+                // Reverse-proxy vhost: forward everything upstream, no PHP/files.
+                out.push_str(&format!("\treverse_proxy {}\n", quote(target)));
+            } else {
+                let php = state.get_php(&v.php_version).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "vhost '{}' references uninstalled PHP {}",
+                        v.server_name,
+                        v.php_version
+                    )
+                })?;
+                out.push_str(&format!("\troot * {}\n", quote(&v.effective_docroot())));
+                out.push_str(&format!(
+                    "\tphp_fastcgi {}\n",
+                    quote(&format!("unix/{}", php.fpm_socket))
+                ));
+                out.push_str("\tfile_server\n");
+                out.push_str(&format!(
+                    "\trequest_body {{\n\t\tmax_size {}\n\t}}\n",
+                    server.setting("max_body", "100MB")
+                ));
+            }
             if v.ssl {
                 // mkcert-minted cert pair (wired in build step 4).
                 let cert = paths::certs_dir()?.join(format!("{}.pem", v.server_name));
@@ -205,5 +210,59 @@ impl WebServerBackend for Caddy {
             keep_alive: true,
             run_at_load: true,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{Framework, PhpVersion};
+
+    fn server() -> Server {
+        Server {
+            name: "caddy".into(),
+            backend: Backend::Caddy,
+            http_port: 80,
+            https_port: 443,
+            enabled: true,
+            default_site: false,
+            settings: Default::default(),
+        }
+    }
+
+    #[test]
+    fn preset_uses_public_subdir_and_proxy_skips_php() {
+        let mut state = State::default();
+        state.php_versions.push(PhpVersion {
+            version: "8.3".into(),
+            fpm_socket: "/run/php83.sock".into(),
+            ..Default::default()
+        });
+        let laravel = Vhost {
+            server_name: "app.test".into(),
+            server: "caddy".into(),
+            docroot: "/Sites/app".into(),
+            php_version: "8.3".into(),
+            ssl: false,
+            preset: Framework::Laravel,
+            proxy_target: None,
+        };
+        let proxy = Vhost {
+            server_name: "vite.test".into(),
+            server: "caddy".into(),
+            docroot: String::new(),
+            php_version: String::new(),
+            ssl: false,
+            preset: Framework::Generic,
+            proxy_target: Some("http://localhost:5173".into()),
+        };
+        let cfg = Config::default();
+        let vhosts = vec![&laravel, &proxy];
+        let out = Caddy::render_caddyfile(&server(), &vhosts, &state, &cfg).unwrap();
+        // Laravel docroot points at the public/ subdir + php_fastcgi.
+        assert!(out.contains("root * /Sites/app/public"));
+        assert!(out.contains("php_fastcgi unix//run/php83.sock"));
+        // Proxy vhost forwards upstream and emits no PHP for itself.
+        assert!(out.contains("reverse_proxy http://localhost:5173"));
     }
 }

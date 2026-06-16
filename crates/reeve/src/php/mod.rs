@@ -34,6 +34,12 @@ pub fn service_id(version: &str) -> String {
     format!("php-{}", compact(version))
 }
 
+/// The FPM master's combined stdout/stderr launchd log for a version,
+/// e.g. `<logs>/php83-launchd.log`.
+pub fn launchd_log(version: &str) -> Result<PathBuf> {
+    Ok(paths::logs_dir()?.join(format!("php{}-launchd.log", compact(version))))
+}
+
 /// Absolute php-fpm binary for a version (shivammathur layout).
 fn fpm_binary(brew: &Brew, version: &str) -> PathBuf {
     brew.opt(&formula(version)).join("sbin/php-fpm")
@@ -59,50 +65,152 @@ fn current_user() -> String {
         })
 }
 
+/// Where a php.ini key lands in the generated FPM pool: a raw pool directive
+/// (`pm.max_children`), a `php_admin_value[...]`, or a `php_admin_flag[...]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhpSettingKind {
+    /// Emitted verbatim in `[www]`, e.g. `pm.max_children = 10`.
+    Pool,
+    /// `php_admin_value[key] = value`.
+    Value,
+    /// `php_admin_flag[key] = on|off`.
+    Flag,
+}
+
+/// A tunable PHP setting reeve exposes per version. Mirrors
+/// [`crate::backends::SettingDef`] but adds where the value is rendered.
+pub struct PhpSettingDef {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub default: &'static str,
+    pub help: &'static str,
+    pub kind: PhpSettingKind,
+}
+
+/// Every per-version PHP tunable, in display order. The `key` doubles as the
+/// `php.ini` directive / pool key and the storage key in `PhpVersion::settings`.
+pub fn php_settings_defs() -> &'static [PhpSettingDef] {
+    use PhpSettingKind::*;
+    &[
+        // php.ini runtime limits.
+        PhpSettingDef {
+            key: "memory_limit",
+            label: "Memory limit",
+            default: "256M",
+            help: "e.g. 256M, 1G",
+            kind: Value,
+        },
+        PhpSettingDef {
+            key: "upload_max_filesize",
+            label: "Max upload size",
+            default: "64M",
+            help: "e.g. 64M",
+            kind: Value,
+        },
+        PhpSettingDef {
+            key: "post_max_size",
+            label: "Max POST size",
+            default: "64M",
+            help: "≥ upload size",
+            kind: Value,
+        },
+        PhpSettingDef {
+            key: "max_execution_time",
+            label: "Max exec time (s)",
+            default: "60",
+            help: "0 = unlimited",
+            kind: Value,
+        },
+        PhpSettingDef {
+            key: "max_input_vars",
+            label: "Max input vars",
+            default: "2000",
+            help: "form/array inputs",
+            kind: Value,
+        },
+        PhpSettingDef {
+            key: "date.timezone",
+            label: "Timezone",
+            default: "UTC",
+            help: "e.g. America/New_York",
+            kind: Value,
+        },
+        PhpSettingDef {
+            key: "display_errors",
+            label: "Display errors",
+            default: "on",
+            help: "on | off",
+            kind: Flag,
+        },
+        // OPcache.
+        PhpSettingDef {
+            key: "opcache.enable",
+            label: "OPcache",
+            default: "1",
+            help: "1 = on, 0 = off",
+            kind: Value,
+        },
+        PhpSettingDef {
+            key: "opcache.memory_consumption",
+            label: "OPcache MB",
+            default: "128",
+            help: "shared memory (MB)",
+            kind: Value,
+        },
+        PhpSettingDef {
+            key: "opcache.revalidate_freq",
+            label: "OPcache revalidate",
+            default: "2",
+            help: "seconds; 0 = always",
+            kind: Value,
+        },
+        // FPM process manager.
+        PhpSettingDef {
+            key: "pm",
+            label: "Process manager",
+            default: "dynamic",
+            help: "dynamic | static | ondemand",
+            kind: Pool,
+        },
+        PhpSettingDef {
+            key: "pm.max_children",
+            label: "Max children",
+            default: "10",
+            help: "worker ceiling",
+            kind: Pool,
+        },
+        PhpSettingDef {
+            key: "pm.start_servers",
+            label: "Start servers",
+            default: "2",
+            help: "initial workers",
+            kind: Pool,
+        },
+        PhpSettingDef {
+            key: "pm.min_spare_servers",
+            label: "Min spare",
+            default: "1",
+            help: "idle floor",
+            kind: Pool,
+        },
+        PhpSettingDef {
+            key: "pm.max_spare_servers",
+            label: "Max spare",
+            default: "4",
+            help: "idle ceiling",
+            kind: Pool,
+        },
+    ]
+}
+
 /// Render the self-contained FPM config (global + one pool) for a version into
 /// `generated/fpm/phpXY.conf`, returning its path. reeve owns this file;
-/// it never touches Homebrew's default php-fpm.conf.
-pub fn render_fpm_conf(version: &str) -> Result<PathBuf> {
+/// it never touches Homebrew's default php-fpm.conf. All php.ini / OPcache /
+/// pool tunables and the Xdebug mode come from the [`PhpVersion`] record.
+pub fn render_fpm_conf(php: &PhpVersion) -> Result<PathBuf> {
     paths::ensure_dirs()?;
-    let c = compact(version);
-    let socket = fpm_socket(version)?;
-    let user = current_user();
-    let run = paths::run_dir()?;
-    let logs = paths::logs_dir()?;
-
-    let conf = format!(
-        r#"; Generated by reeve — do not edit by hand.
-; PHP {version} FPM master.
-[global]
-pid = {run}/php{c}-fpm.pid
-error_log = {logs}/php{c}-fpm.log
-daemonize = no
-
-[www]
-user = {user}
-group = staff
-listen = {socket}
-listen.owner = {user}
-listen.group = staff
-listen.mode = 0660
-pm = dynamic
-pm.max_children = 10
-pm.start_servers = 2
-pm.min_spare_servers = 1
-pm.max_spare_servers = 4
-catch_workers_output = yes
-clear_env = no
-php_admin_value[error_log] = {logs}/php{c}-php.log
-php_admin_flag[log_errors] = on
-"#,
-        version = version,
-        c = c,
-        run = run.display(),
-        logs = logs.display(),
-        user = user,
-        socket = socket.display(),
-    );
-
+    let c = compact(&php.version);
+    let conf = build_fpm_conf(php)?;
     let path = paths::generated_dir()?
         .join("fpm")
         .join(format!("php{c}.conf"));
@@ -111,9 +219,86 @@ php_admin_flag[log_errors] = on
     Ok(path)
 }
 
-/// Stand up (or restart) the launchd-managed FPM master for a version.
-pub fn ensure_fpm_running(brew: &Brew, version: &str) -> Result<()> {
-    let conf = render_fpm_conf(version)?;
+/// Build the FPM pool config string for a version (pure; no disk writes), so it
+/// can be unit-tested. `render_fpm_conf` writes the result.
+fn build_fpm_conf(php: &PhpVersion) -> Result<String> {
+    let version = &php.version;
+    let c = compact(version);
+    let socket = fpm_socket(version)?;
+    let user = current_user();
+    let run = paths::run_dir()?;
+    let logs = paths::logs_dir()?;
+
+    // Header + pool identity.
+    let mut conf = format!(
+        "; Generated by reeve — do not edit by hand.\n\
+         ; PHP {version} FPM master.\n\
+         [global]\n\
+         pid = {run}/php{c}-fpm.pid\n\
+         error_log = {logs}/php{c}-fpm.log\n\
+         daemonize = no\n\
+         \n\
+         [www]\n\
+         user = {user}\n\
+         group = staff\n\
+         listen = {socket}\n\
+         listen.owner = {user}\n\
+         listen.group = staff\n\
+         listen.mode = 0660\n",
+        version = version,
+        c = c,
+        run = run.display(),
+        logs = logs.display(),
+        user = user,
+        socket = socket.display(),
+    );
+
+    // Tunable directives, grouped by where they land.
+    for def in php_settings_defs() {
+        let val = php.setting(def.key, def.default);
+        match def.kind {
+            PhpSettingKind::Pool => conf.push_str(&format!("{} = {}\n", def.key, val)),
+            PhpSettingKind::Value => {
+                conf.push_str(&format!("php_admin_value[{}] = {}\n", def.key, val))
+            }
+            PhpSettingKind::Flag => {
+                conf.push_str(&format!("php_admin_flag[{}] = {}\n", def.key, val))
+            }
+        }
+    }
+
+    // Fixed plumbing reeve always owns (logging + env passthrough).
+    conf.push_str(&format!(
+        "catch_workers_output = yes\n\
+         clear_env = no\n\
+         php_admin_value[error_log] = {logs}/php{c}-php.log\n\
+         php_admin_flag[log_errors] = on\n",
+        logs = logs.display(),
+        c = c,
+    ));
+
+    // Xdebug: always pin the mode so an installed Xdebug is neutralized when
+    // off; add the debugger client port + auto-trigger when active.
+    conf.push_str(&format!(
+        "php_admin_value[xdebug.mode] = {}\n",
+        php.xdebug.as_str()
+    ));
+    if !php.xdebug.is_off() {
+        conf.push_str(&format!(
+            "php_admin_value[xdebug.client_port] = {}\n\
+             php_admin_flag[xdebug.start_with_request] = on\n",
+            php.xdebug_port
+        ));
+    }
+
+    Ok(conf)
+}
+
+/// Stand up (or restart) the launchd-managed FPM master for a version, applying
+/// the version's php.ini / OPcache / pool / Xdebug settings.
+pub fn ensure_fpm_running(brew: &Brew, php: &PhpVersion) -> Result<()> {
+    let version = &php.version;
+    let conf = render_fpm_conf(php)?;
     let bin = fpm_binary(brew, version);
     if !bin.exists() {
         bail!(
@@ -132,7 +317,7 @@ pub fn ensure_fpm_running(brew: &Brew, version: &str) -> Result<()> {
             "-c".into(),
             ini_dir(brew, version).display().to_string(),
         ],
-        log: paths::logs_dir()?.join(format!("php{}-launchd.log", compact(version))),
+        log: launchd_log(version)?,
         keep_alive: true,
         run_at_load: true,
     };
@@ -152,9 +337,7 @@ pub fn ensure_fpm_running(brew: &Brew, version: &str) -> Result<()> {
         "FPM master for PHP {version} started but socket {} never appeared. \
          Check {}.",
         socket.display(),
-        paths::logs_dir()?
-            .join(format!("php{}-launchd.log", compact(version)))
-            .display()
+        launchd_log(version)?.display()
     )
 }
 
@@ -181,12 +364,13 @@ pub fn install(brew: &Brew, version: &str) -> Result<PhpVersion> {
         );
         brew.install(&formula(version))?;
     }
-    ensure_fpm_running(brew, version)?;
-    Ok(PhpVersion {
+    let record = PhpVersion {
         version: version.to_string(),
         fpm_socket: fpm_socket(version)?.display().to_string(),
-        extensions: Vec::new(),
-    })
+        ..Default::default()
+    };
+    ensure_fpm_running(brew, &record)?;
+    Ok(record)
 }
 
 /// Scan `<prefix>/opt/php@*` for already-installed versions.
@@ -210,11 +394,41 @@ pub fn discover(brew: &Brew) -> Vec<String> {
 mod tests {
     use super::*;
 
+    use crate::state::XdebugMode;
+
     #[test]
     fn naming_conventions() {
         assert_eq!(formula("8.3"), "php@8.3");
         assert_eq!(compact("8.3"), "83");
         assert_eq!(service_id("8.4"), "php-84");
         assert!(fpm_socket("8.3").unwrap().ends_with("php83.sock"));
+    }
+
+    #[test]
+    fn fpm_conf_uses_defaults_then_overrides() {
+        let mut php = PhpVersion {
+            version: "8.3".into(),
+            ..Default::default()
+        };
+        // Defaults render for untouched keys.
+        let conf = build_fpm_conf(&php).unwrap();
+        assert!(conf.contains("pm.max_children = 10"));
+        assert!(conf.contains("php_admin_value[memory_limit] = 256M"));
+        assert!(conf.contains("php_admin_flag[display_errors] = on"));
+        // Xdebug off is still pinned so an installed Xdebug is neutralized.
+        assert!(conf.contains("php_admin_value[xdebug.mode] = off"));
+        assert!(!conf.contains("xdebug.client_port"));
+
+        // Overrides win; a pool directive and an admin value both flow through.
+        php.settings.insert("pm.max_children".into(), "32".into());
+        php.settings.insert("memory_limit".into(), "1G".into());
+        php.xdebug = XdebugMode::Debug;
+        php.xdebug_port = 9009;
+        let conf = build_fpm_conf(&php).unwrap();
+        assert!(conf.contains("pm.max_children = 32"));
+        assert!(conf.contains("php_admin_value[memory_limit] = 1G"));
+        assert!(conf.contains("php_admin_value[xdebug.mode] = debug"));
+        assert!(conf.contains("php_admin_value[xdebug.client_port] = 9009"));
+        assert!(conf.contains("php_admin_flag[xdebug.start_with_request] = on"));
     }
 }

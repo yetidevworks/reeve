@@ -133,14 +133,6 @@ impl Apache {
         }
 
         for v in vhosts {
-            let php = state.get_php(&v.php_version).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "vhost '{}' references uninstalled PHP {}",
-                    v.server_name,
-                    v.php_version
-                )
-            })?;
-            let handler = format!("proxy:unix:{}|fcgi://localhost", php.fpm_socket);
             let port = if v.ssl {
                 server.https_port
             } else {
@@ -149,16 +141,32 @@ impl Apache {
 
             out.push_str(&format!("<VirtualHost *:{port}>\n"));
             out.push_str(&format!("    ServerName {}\n", v.server_name));
-            out.push_str(&format!("    DocumentRoot {}\n", q(&v.docroot)));
-            out.push_str(&format!("    <Directory {}>\n", q(&v.docroot)));
-            out.push_str("        Options Indexes FollowSymLinks\n");
-            out.push_str("        AllowOverride All\n");
-            out.push_str("        Require all granted\n");
-            out.push_str("    </Directory>\n");
-            out.push_str("    DirectoryIndex index.php index.html\n");
-            out.push_str("    <FilesMatch \\.php$>\n");
-            out.push_str(&format!("        SetHandler {}\n", q(&handler)));
-            out.push_str("    </FilesMatch>\n");
+            if let Some(target) = &v.proxy_target {
+                // Reverse-proxy vhost: forward everything upstream.
+                out.push_str("    ProxyPreserveHost On\n");
+                out.push_str(&format!("    ProxyPass / {}/\n", q(target)));
+                out.push_str(&format!("    ProxyPassReverse / {}/\n", q(target)));
+            } else {
+                let php = state.get_php(&v.php_version).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "vhost '{}' references uninstalled PHP {}",
+                        v.server_name,
+                        v.php_version
+                    )
+                })?;
+                let handler = format!("proxy:unix:{}|fcgi://localhost", php.fpm_socket);
+                let docroot = v.effective_docroot();
+                out.push_str(&format!("    DocumentRoot {}\n", q(&docroot)));
+                out.push_str(&format!("    <Directory {}>\n", q(&docroot)));
+                out.push_str("        Options Indexes FollowSymLinks\n");
+                out.push_str("        AllowOverride All\n");
+                out.push_str("        Require all granted\n");
+                out.push_str("    </Directory>\n");
+                out.push_str("    DirectoryIndex index.php index.html\n");
+                out.push_str("    <FilesMatch \\.php$>\n");
+                out.push_str(&format!("        SetHandler {}\n", q(&handler)));
+                out.push_str("    </FilesMatch>\n");
+            }
             if v.ssl {
                 let cert = paths::certs_dir()?.join(format!("{}.pem", v.server_name));
                 let key = paths::certs_dir()?.join(format!("{}-key.pem", v.server_name));

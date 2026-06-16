@@ -27,14 +27,26 @@ the thing the old switcher-script approach can't do.
 ## Highlights
 
 - **Per-vhost PHP version** — each vhost picks its PHP; versions run side by side.
+- **Per-version PHP tuning** — `memory_limit`, upload sizes, OPcache, FPM pool,
+  timezone, and a one-click **Xdebug** toggle (off/debug/profile), all without
+  hand-editing `php.ini`.
 - **Multiple backends** behind one abstraction: **Caddy**, **Apache**, **nginx**
   (OpenLiteSpeed is wired but unsupported on macOS — see below).
 - **Run several servers at once**, on different ports, managed independently.
+- **Background services** — install/start/stop **MySQL, MariaDB, PostgreSQL,
+  Redis, memcached, Mailpit** via Homebrew + launchd, alongside the web stack.
+- **Framework presets** — `laravel`, `wordpress`, `symfony`, `grav`, `drupal`
+  set the right docroot + rewrites automatically; or point a vhost at an
+  upstream dev server as a **reverse proxy** (Vite, Node, …).
+- **Directory parking** (Valet-style) — park `~/Sites` and every subfolder
+  auto-serves as `<folder>.test`, framework auto-detected, no per-project setup.
 - **Trusted local SSL** via a shared mkcert CA — `https://app.test` with no warnings.
 - **Wildcard DNS** for one or more TLDs (`.test`, `.localhost`, `.lan`, …) via a
   user-run dnsmasq (no root daemon).
 - **Default site** — optionally serve a catch-all from your sites root, so
   `http(s)://localhost` works without a per-project vhost.
+- **`logs` + `doctor`** — tail any service's log, and a one-shot health check of
+  the whole stack (Homebrew, servers, FPM, services, DNS, certs, ports).
 - **TUI dashboard** with live status, plus a scriptable CLI — same engine underneath.
 - **No sudo** for day-to-day use; servers bind 80/443 as your user via launchd.
 
@@ -83,6 +95,24 @@ reeve vhost add app.test --root ~/Sites/app --php 8.3 --server caddy --ssl
 reeve server start caddy   # render config, mint cert, start
 ```
 
+Add a database and a mail catcher, tune PHP, or use a framework preset:
+
+```bash
+reeve service add mysql && reeve service start mysql   # MySQL on :3306
+reeve service add mailpit && reeve service start mailpit  # SMTP :1025, UI :8025
+reeve php set 8.3 memory_limit 512M                    # tune php.ini
+reeve php xdebug 8.3 debug                              # one-click Xdebug
+reeve vhost add shop.test --root ~/Sites/shop --php 8.3 --server caddy --ssl --preset laravel
+reeve vhost add ui.test --proxy http://localhost:5173 --server caddy --ssl   # reverse proxy
+```
+
+Or park a directory so every project in it just works, no per-site setup:
+
+```bash
+reeve park add ~/Sites --server caddy --php 8.3 --ssl   # ~/Sites/blog → blog.test, etc.
+reeve apply                                             # picks up new folders anytime
+```
+
 One-time DNS + trust setup so `*.test` resolves system-wide and certs are trusted:
 
 ```bash
@@ -104,17 +134,21 @@ reeve
 ```
 
 ```
- reeve   [.test ✓ resolving]
+ reeve   [.test ✓ resolving]   ● health (L logs)
 ┌ Servers ─────────────────────────────────────────────┐
 │ › caddy    caddy   :80/:443     ● running             │
 │   apache   apache  :8080/:8543  ● running             │
 │   nginx    nginx   :9090/:9443  ○ stopped             │
 ├ Vhosts ───────────────────────────────────────────────┤
 │   https://app.test   caddy   8.3   ~/Sites/app        │
+│   https://blog.test  caddy   8.3   ~/Sites/blog (parked)│
 ├ PHP ──────────────────────────────────────────────────┤
-│ 8.3★ ● running    8.4 ● running                       │
+│ 8.3★ ● running 🐛debug    8.4 ● running               │
+├ Services ─────────────────────────────────────────────┤
+│ › mysql      :3306   ● running                        │
+│   mailpit    :8025   ● running                        │
 └───────────────────────────────────────────────────────┘
- enter start · x stop · r restart · n new · e edit · s settings · q quit
+ enter start · x stop · r restart · n new · s settings · L log · q quit
 ```
 
 Navigation is shared across panels; the key bar is context-aware (it shows the
@@ -123,13 +157,15 @@ keys for the focused panel).
 | Key | Action |
 |-----|--------|
 | `↑` `↓` `←` `→` / `hjkl` | Move selection within the focused panel |
-| `Tab` / `Shift-Tab` | Switch panel (Servers → Vhosts → PHP) |
-| `n` | New — server / vhost / PHP install (per focused panel) |
+| `Tab` / `Shift-Tab` | Switch panel (Servers → Vhosts → PHP → Services) |
+| `n` | New — server / vhost / PHP install / service (per focused panel) |
 | `e` | Edit — server (ports, backend, default site) / vhost / PHP extensions |
-| `Enter` | Start server / restart FPM master |
-| `x` · `r` | Stop · restart (Servers) |
-| `s` | Per-backend settings (Servers) |
+| `Enter` | Start server or service / restart FPM master |
+| `x` · `r` | Stop · restart (Servers, Services) |
+| `s` | Per-backend settings (Servers) / per-version PHP settings (PHP) |
+| `x` | Cycle Xdebug off→debug→profile (PHP panel) |
 | `d` | Set default PHP version (PHP panel) |
+| `L` | View the focused item's log |
 | `Del` / `Backspace` | Remove the focused item (with confirm) |
 | `a` · `v` | Apply · validate all configs |
 | `c` | Preferences (TLDs, sites root, default backend) |
@@ -144,12 +180,19 @@ keys for the focused panel).
 | `php install <ver>` | Install (or adopt) a PHP version + FPM master |
 | `php list` / `php use <ver>` | List versions / set the default |
 | `php ext add\|remove\|list <ver> [name]` | Manage extensions per version (pecl) |
+| `php settings <ver>` / `php set <ver> <key> <value>` | Show / tune php.ini, OPcache, FPM pool |
+| `php xdebug <ver> off\|debug\|profile` | Toggle Xdebug for a version |
 | `server add <backend> [--http N --https N]` | Add caddy\|apache\|nginx |
 | `server start\|stop\|restart\|list <name>` | Manage a server (independent) |
-| `vhost add <host> --root <dir> --php <ver> --server <name> [--ssl]` | Add a vhost |
+| `vhost add <host> --root <dir> --php <ver> --server <name> [--ssl] [--preset <fw>] [--proxy <url>]` | Add a vhost |
 | `vhost list\|remove <host>` | Manage vhosts |
+| `service add\|start\|stop\|restart\|remove\|list <kind>` | Manage databases / redis / memcached / mailpit |
+| `park add <dir> --server <name> --php <ver> [--tld T] [--ssl]` | Auto-serve every subfolder as `<folder>.<tld>` |
+| `park list\|remove <dir>` | Manage parked directories |
 | `apply` | Render generated configs + reconcile running services |
 | `validate` | Run every backend's native config test |
+| `logs [<target>] [-n N] [--follow]` | View or tail a service's log |
+| `doctor` | Diagnose the whole stack (brew, servers, FPM, services, DNS, certs, ports) |
 | `ssl mint <host>` / `ssl trust` / `ssl ca` | Local certificates |
 | `dns setup` / `dns status` | Wildcard `*.test` DNS |
 

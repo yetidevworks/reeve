@@ -81,6 +81,57 @@ impl Server {
     }
 }
 
+/// Xdebug operating mode for a PHP version. `Off` neutralizes an installed
+/// Xdebug (near-zero overhead in Xdebug 3); the others set `xdebug.mode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum XdebugMode {
+    #[default]
+    Off,
+    Debug,
+    Profile,
+}
+
+impl XdebugMode {
+    /// The value to write for `xdebug.mode`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            XdebugMode::Off => "off",
+            XdebugMode::Debug => "debug",
+            XdebugMode::Profile => "profile",
+        }
+    }
+
+    pub fn is_off(&self) -> bool {
+        matches!(self, XdebugMode::Off)
+    }
+
+    /// Cycle off → debug → profile → off (for the TUI toggle).
+    pub fn next(&self) -> Self {
+        match self {
+            XdebugMode::Off => XdebugMode::Debug,
+            XdebugMode::Debug => XdebugMode::Profile,
+            XdebugMode::Profile => XdebugMode::Off,
+        }
+    }
+}
+
+impl FromStr for XdebugMode {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self> {
+        match s.to_lowercase().as_str() {
+            "off" | "0" | "false" => Ok(XdebugMode::Off),
+            "debug" | "on" => Ok(XdebugMode::Debug),
+            "profile" => Ok(XdebugMode::Profile),
+            other => bail!("Unknown Xdebug mode '{other}'. Use off|debug|profile."),
+        }
+    }
+}
+
+fn default_xdebug_port() -> u16 {
+    9003
+}
+
 /// An installed PHP version with its own php-fpm master + socket.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PhpVersion {
@@ -90,6 +141,115 @@ pub struct PhpVersion {
     pub fpm_socket: String,
     #[serde(default)]
     pub extensions: Vec<String>,
+    /// php.ini / OPcache / FPM-pool overrides. Keys are defined by
+    /// [`crate::php::php_settings_defs`]; empty = all defaults.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub settings: std::collections::BTreeMap<String, String>,
+    /// Xdebug mode (off unless explicitly enabled).
+    #[serde(default, skip_serializing_if = "XdebugMode::is_off")]
+    pub xdebug: XdebugMode,
+    /// Debugger client port Xdebug connects back to (IDE listens here).
+    #[serde(default = "default_xdebug_port")]
+    pub xdebug_port: u16,
+}
+
+impl Default for PhpVersion {
+    fn default() -> Self {
+        Self {
+            version: String::new(),
+            fpm_socket: String::new(),
+            extensions: Vec::new(),
+            settings: std::collections::BTreeMap::new(),
+            xdebug: XdebugMode::Off,
+            xdebug_port: default_xdebug_port(),
+        }
+    }
+}
+
+impl PhpVersion {
+    /// A setting value, falling back to the supplied default.
+    pub fn setting<'a>(&'a self, key: &str, default: &'a str) -> &'a str {
+        self.settings
+            .get(key)
+            .map(|s| s.as_str())
+            .unwrap_or(default)
+    }
+}
+
+/// A framework preset: picks the conventional public subdir and rewrite rules
+/// so a vhost "just works" for that app type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Framework {
+    #[default]
+    Generic,
+    Laravel,
+    Wordpress,
+    Symfony,
+    Grav,
+    Drupal,
+}
+
+impl Framework {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Framework::Generic => "generic",
+            Framework::Laravel => "laravel",
+            Framework::Wordpress => "wordpress",
+            Framework::Symfony => "symfony",
+            Framework::Grav => "grav",
+            Framework::Drupal => "drupal",
+        }
+    }
+
+    pub fn is_generic(&self) -> bool {
+        matches!(self, Framework::Generic)
+    }
+
+    /// Every preset, in selector order.
+    pub fn all() -> [Framework; 6] {
+        [
+            Framework::Generic,
+            Framework::Laravel,
+            Framework::Wordpress,
+            Framework::Symfony,
+            Framework::Grav,
+            Framework::Drupal,
+        ]
+    }
+
+    /// Conventional public subdirectory served as the docroot (empty = root).
+    pub fn public_subdir(&self) -> &'static str {
+        match self {
+            Framework::Laravel | Framework::Symfony => "public",
+            Framework::Drupal => "web",
+            _ => "",
+        }
+    }
+}
+
+impl fmt::Display for Framework {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(self.as_str())
+    }
+}
+
+impl FromStr for Framework {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self> {
+        match s.to_lowercase().as_str() {
+            "generic" | "" | "none" => Ok(Framework::Generic),
+            "laravel" => Ok(Framework::Laravel),
+            "wordpress" | "wp" => Ok(Framework::Wordpress),
+            "symfony" => Ok(Framework::Symfony),
+            "grav" => Ok(Framework::Grav),
+            "drupal" => Ok(Framework::Drupal),
+            other => bail!(
+                "Unknown preset '{other}'. Use \
+                 generic|laravel|wordpress|symfony|grav|drupal."
+            ),
+        }
+    }
 }
 
 /// Binds a hostname to a docroot, an owning server, and a PHP version.
@@ -104,6 +264,117 @@ pub struct Vhost {
     pub php_version: String,
     #[serde(default)]
     pub ssl: bool,
+    /// Framework preset controlling docroot subdir + rewrites.
+    #[serde(default, skip_serializing_if = "Framework::is_generic")]
+    pub preset: Framework,
+    /// When set, the vhost is a reverse proxy to this upstream (e.g.
+    /// `http://localhost:5173`) instead of serving PHP/files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_target: Option<String>,
+}
+
+impl Vhost {
+    /// The docroot actually served, with the preset's public subdir appended.
+    pub fn effective_docroot(&self) -> String {
+        let sub = self.preset.public_subdir();
+        if sub.is_empty() {
+            self.docroot.clone()
+        } else {
+            format!("{}/{}", self.docroot.trim_end_matches('/'), sub)
+        }
+    }
+
+    /// True when this vhost is a reverse proxy rather than a file/PHP server.
+    pub fn is_proxy(&self) -> bool {
+        self.proxy_target.is_some()
+    }
+}
+
+/// A managed background service reeve can install/start/stop via Homebrew +
+/// launchd (databases, cache, mail). reeve adopts each formula's default
+/// datadir/config and just owns the launchd lifecycle and logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ServiceKind {
+    Mysql,
+    Mariadb,
+    Postgres,
+    Redis,
+    Memcached,
+    Mailpit,
+}
+
+impl ServiceKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ServiceKind::Mysql => "mysql",
+            ServiceKind::Mariadb => "mariadb",
+            ServiceKind::Postgres => "postgres",
+            ServiceKind::Redis => "redis",
+            ServiceKind::Memcached => "memcached",
+            ServiceKind::Mailpit => "mailpit",
+        }
+    }
+
+    /// Every kind, in display order.
+    pub fn all() -> [ServiceKind; 6] {
+        [
+            ServiceKind::Mysql,
+            ServiceKind::Mariadb,
+            ServiceKind::Postgres,
+            ServiceKind::Redis,
+            ServiceKind::Memcached,
+            ServiceKind::Mailpit,
+        ]
+    }
+}
+
+impl fmt::Display for ServiceKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(self.as_str())
+    }
+}
+
+impl FromStr for ServiceKind {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self> {
+        match s.to_lowercase().as_str() {
+            "mysql" => Ok(ServiceKind::Mysql),
+            "mariadb" => Ok(ServiceKind::Mariadb),
+            "postgres" | "postgresql" | "pg" => Ok(ServiceKind::Postgres),
+            "redis" => Ok(ServiceKind::Redis),
+            "memcached" | "memcache" => Ok(ServiceKind::Memcached),
+            "mailpit" => Ok(ServiceKind::Mailpit),
+            other => bail!(
+                "Unknown service '{other}'. Use \
+                 mysql|mariadb|postgres|redis|memcached|mailpit."
+            ),
+        }
+    }
+}
+
+/// A managed-service entry in `state.toml`. One instance per kind.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedServiceInstance {
+    pub kind: ServiceKind,
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+/// A parked directory: every immediate subfolder with web content is served
+/// automatically as `<subfolder>.<tld>` by `server`, no per-project vhost.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Park {
+    /// Absolute directory whose subfolders become vhosts.
+    pub root: String,
+    /// Owning [`Server::name`].
+    pub server: String,
+    /// PHP version every parked site runs.
+    pub php_version: String,
+    /// TLD appended to each subfolder name.
+    pub tld: String,
+    #[serde(default)]
+    pub ssl: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -114,6 +385,10 @@ pub struct State {
     pub php_versions: Vec<PhpVersion>,
     #[serde(default)]
     pub vhosts: Vec<Vhost>,
+    #[serde(default)]
+    pub services: Vec<ManagedServiceInstance>,
+    #[serde(default)]
+    pub parks: Vec<Park>,
 }
 
 impl State {
@@ -121,13 +396,12 @@ impl State {
         self.servers.iter().find(|s| s.name == name)
     }
 
-    pub fn get_php(&self, version: &str) -> Option<&PhpVersion> {
-        self.php_versions.iter().find(|p| p.version == version)
+    pub fn get_service(&self, kind: ServiceKind) -> Option<&ManagedServiceInstance> {
+        self.services.iter().find(|s| s.kind == kind)
     }
 
-    /// Vhosts owned by a given server.
-    pub fn vhosts_for(&self, server: &str) -> Vec<&Vhost> {
-        self.vhosts.iter().filter(|v| v.server == server).collect()
+    pub fn get_php(&self, version: &str) -> Option<&PhpVersion> {
+        self.php_versions.iter().find(|p| p.version == version)
     }
 
     pub fn add_server(&mut self, server: Server) -> Result<()> {
@@ -160,7 +434,8 @@ impl State {
         if self.get_server(&vhost.server).is_none() {
             bail!("Server '{}' does not exist", vhost.server);
         }
-        if self.get_php(&vhost.php_version).is_none() {
+        // Proxy vhosts don't serve PHP, so they don't need a PHP version.
+        if !vhost.is_proxy() && self.get_php(&vhost.php_version).is_none() {
             bail!(
                 "PHP {} is not installed. Run `reeve php install {}`.",
                 vhost.php_version,
@@ -218,13 +493,39 @@ mod tests {
     }
 
     #[test]
+    fn service_kind_parse_roundtrip() {
+        for k in ServiceKind::all() {
+            assert_eq!(k.as_str().parse::<ServiceKind>().unwrap(), k);
+        }
+        assert_eq!(
+            "postgresql".parse::<ServiceKind>().unwrap(),
+            ServiceKind::Postgres
+        );
+        assert!("bogus".parse::<ServiceKind>().is_err());
+    }
+
+    #[test]
+    fn services_survive_toml_roundtrip() {
+        let mut s = State::default();
+        s.services.push(ManagedServiceInstance {
+            kind: ServiceKind::Mailpit,
+            enabled: true,
+        });
+        let toml = toml::to_string_pretty(&s).unwrap();
+        let back: State = toml::from_str(&toml).unwrap();
+        assert_eq!(back.services.len(), 1);
+        assert_eq!(back.services[0].kind, ServiceKind::Mailpit);
+        assert!(back.services[0].enabled);
+    }
+
+    #[test]
     fn state_toml_roundtrip() {
         let mut s = State::default();
         s.servers.push(server("caddy", 80, 443));
         s.php_versions.push(PhpVersion {
             version: "8.3".into(),
             fpm_socket: "/run/php83.sock".into(),
-            extensions: vec![],
+            ..Default::default()
         });
         s.vhosts.push(Vhost {
             server_name: "a.test".into(),
@@ -232,12 +533,35 @@ mod tests {
             docroot: "/Sites/a".into(),
             php_version: "8.3".into(),
             ssl: true,
+            preset: Framework::Laravel,
+            proxy_target: None,
         });
         let toml = toml::to_string_pretty(&s).unwrap();
         let back: State = toml::from_str(&toml).unwrap();
         assert_eq!(back.servers.len(), 1);
         assert_eq!(back.vhosts[0].server_name, "a.test");
         assert!(back.vhosts[0].ssl);
+        assert_eq!(back.vhosts[0].preset, Framework::Laravel);
+        // Laravel serves from the public/ subdir.
+        assert_eq!(back.vhosts[0].effective_docroot(), "/Sites/a/public");
+    }
+
+    #[test]
+    fn proxy_vhost_skips_php_requirement() {
+        let mut s = State::default();
+        s.add_server(server("caddy", 80, 443)).unwrap();
+        let v = Vhost {
+            server_name: "vite.test".into(),
+            server: "caddy".into(),
+            docroot: String::new(),
+            php_version: String::new(),
+            ssl: false,
+            preset: Framework::Generic,
+            proxy_target: Some("http://localhost:5173".into()),
+        };
+        // No PHP installed, but a proxy vhost doesn't need one.
+        s.add_vhost(v).unwrap();
+        assert!(s.vhosts[0].is_proxy());
     }
 
     #[test]
@@ -259,6 +583,8 @@ mod tests {
             docroot: "/Sites/a".into(),
             php_version: "8.3".into(),
             ssl: false,
+            preset: Framework::Generic,
+            proxy_target: None,
         };
         assert!(s.add_vhost(v.clone()).is_err()); // no server yet
         s.add_server(server("caddy", 80, 443)).unwrap();
@@ -266,7 +592,7 @@ mod tests {
         s.php_versions.push(PhpVersion {
             version: "8.3".into(),
             fpm_socket: "/run/php83.sock".into(),
-            extensions: vec![],
+            ..Default::default()
         });
         s.add_vhost(v).unwrap();
         assert_eq!(s.vhosts.len(), 1);

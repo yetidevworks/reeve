@@ -8,9 +8,11 @@ use crate::backends::settings_defs;
 use crate::brew::Brew;
 use crate::config::{load_config, save_config, Config};
 use crate::daemon::{self, Status};
+use crate::doctor::{self, Health};
+use crate::logs;
 use crate::ops;
 use crate::php;
-use crate::state::{load_state, Backend, State};
+use crate::state::{load_state, Backend, Framework, State, XdebugMode};
 use anyhow::Result;
 use crossterm::{
     event::{
@@ -28,6 +30,7 @@ pub enum Panel {
     Servers,
     Php,
     Vhosts,
+    Services,
 }
 
 pub struct App {
@@ -37,8 +40,12 @@ pub struct App {
     pub sel_server: usize,
     pub sel_php: usize,
     pub sel_vhost: usize,
+    pub sel_service: usize,
     pub server_status: Vec<Status>,
     pub php_status: Vec<Status>,
+    pub service_status: Vec<Status>,
+    /// Parked-directory sites expanded from `state.parks` (read-only, derived).
+    pub parked_vhosts: Vec<crate::state::Vhost>,
     pub message: String,
     pub wizard: Option<VhostWizard>,
     /// When set, a "remove vhost <name>?" confirmation is showing.
@@ -64,11 +71,38 @@ pub struct App {
     pub pending_ext: Option<PendingExt>,
     /// Global preferences (local TLD, sites root, default backend) modal.
     pub config_modal: Option<ConfigModal>,
+    /// Per-version PHP settings modal (php.ini / OPcache / FPM pool), when open.
+    pub php_settings: Option<PhpSettingsModal>,
+    /// A queued Xdebug enable that needs a (slow) pecl install — run_loop
+    /// suspends the TUI to show output, like `pending_ext`.
+    pub pending_xdebug: Option<(String, XdebugMode)>,
+    /// Service-picker modal (choose a kind to add), when open.
+    pub service_picker: Option<ServicePicker>,
+    /// A queued service start that may need a (slow) brew install — run_loop
+    /// suspends the TUI to show output.
+    pub pending_service: Option<crate::state::ServiceKind>,
+    /// A queued server start whose backend needs a (slow) brew install.
+    pub pending_server: Option<String>,
+    /// Log-viewer modal (read-only tail of a service log), when open.
+    pub log_modal: Option<LogModal>,
+    /// Worst-of health across all diagnostics, shown in the title bar.
+    pub health: Health,
     /// Set after an action that may have disturbed the terminal (e.g. the admin
     /// dialog); run_loop does a full repaint to clear any leftover artifacts.
     force_clear: bool,
     should_quit: bool,
 }
+
+/// Read-only log viewer for a single service's log file.
+pub struct LogModal {
+    pub label: String,
+    pub lines: Vec<String>,
+    /// First visible line index (scroll offset).
+    pub scroll: usize,
+}
+
+/// Trailing lines to load into the log viewer.
+pub const LOG_TAIL_LINES: usize = 500;
 
 /// Global preferences modal. Edits `config.toml` (local TLD, sites root,
 /// default backend) — distinct from per-server [`SettingsModal`].
@@ -124,6 +158,21 @@ pub struct SettingsModal {
     pub error: Option<String>,
 }
 
+/// Service-picker modal: choose a service kind to add + start. `sel` indexes
+/// `ServiceKind::all()`.
+pub struct ServicePicker {
+    pub sel: usize,
+}
+
+/// Per-version PHP settings modal state. `values` parallels
+/// `php::php_settings_defs()`.
+pub struct PhpSettingsModal {
+    pub version: String,
+    pub values: Vec<String>,
+    pub field: usize,
+    pub error: Option<String>,
+}
+
 /// Backends in selector order.
 pub const BACKENDS: [Backend; 4] = [
     Backend::Caddy,
@@ -149,8 +198,9 @@ pub struct ServerWizard {
     pub installed: [bool; 4],
 }
 
-/// Number of editable fields in the new-vhost wizard.
-pub const WIZARD_FIELDS: usize = 5;
+/// Number of editable fields in the new-vhost wizard
+/// (host, docroot, php, server, ssl, preset).
+pub const WIZARD_FIELDS: usize = 6;
 
 /// Modal form state for creating a vhost.
 pub struct VhostWizard {
@@ -167,6 +217,10 @@ pub struct VhostWizard {
     pub dropdown_open: bool,
     /// Highlighted entry within the open dropdown.
     pub path_sel: Option<usize>,
+    /// Framework preset (field 5).
+    pub preset: Framework,
+    /// Proxy target carried through edits (set only via the CLI `--proxy`).
+    pub proxy_target: Option<String>,
 }
 
 impl VhostWizard {
@@ -210,8 +264,11 @@ impl App {
             sel_server: 0,
             sel_php: 0,
             sel_vhost: 0,
+            sel_service: 0,
             server_status: Vec::new(),
             php_status: Vec::new(),
+            service_status: Vec::new(),
+            parked_vhosts: Vec::new(),
             message: "ready".into(),
             wizard: None,
             confirm_remove: None,
@@ -225,6 +282,13 @@ impl App {
             ext_modal: None,
             pending_ext: None,
             config_modal: None,
+            php_settings: None,
+            pending_xdebug: None,
+            service_picker: None,
+            pending_service: None,
+            pending_server: None,
+            log_modal: None,
+            health: Health::Ok,
             force_clear: false,
             should_quit: false,
         };
@@ -248,7 +312,16 @@ impl App {
             .iter()
             .map(|p| daemon::status(&php::service_id(&p.version)))
             .collect();
+        self.service_status = self
+            .state
+            .services
+            .iter()
+            .map(|s| daemon::status(&crate::services::service_id(s.kind)))
+            .collect();
+        self.parked_vhosts = crate::park::expand_all(&self.state);
         self.dns_ok = crate::dns::resolver_ok_all(&self.config.local_tlds);
+        let brew = Brew::detect().ok();
+        self.health = doctor::summary(&doctor::run(brew.as_ref(), &self.config, &self.state));
         self.clamp();
     }
 
@@ -262,6 +335,9 @@ impl App {
         self.sel_vhost = self
             .sel_vhost
             .min(self.state.vhosts.len().saturating_sub(1));
+        self.sel_service = self
+            .sel_service
+            .min(self.state.services.len().saturating_sub(1));
     }
 
     fn focus_len(&self) -> usize {
@@ -269,6 +345,7 @@ impl App {
             Panel::Servers => self.state.servers.len(),
             Panel::Php => self.state.php_versions.len(),
             Panel::Vhosts => self.state.vhosts.len(),
+            Panel::Services => self.state.services.len(),
         }
     }
 
@@ -277,6 +354,7 @@ impl App {
             Panel::Servers => &mut self.sel_server,
             Panel::Php => &mut self.sel_php,
             Panel::Vhosts => &mut self.sel_vhost,
+            Panel::Services => &mut self.sel_service,
         }
     }
 
@@ -291,14 +369,16 @@ impl App {
     }
 
     fn cycle_focus(&mut self, forward: bool) {
-        // Visual order top→bottom: Servers, Vhosts, PHP (PHP least used, at bottom).
+        // Visual order top→bottom: Servers, Vhosts, PHP, Services.
         self.focus = match (self.focus, forward) {
             (Panel::Servers, true) => Panel::Vhosts,
             (Panel::Vhosts, true) => Panel::Php,
-            (Panel::Php, true) => Panel::Servers,
-            (Panel::Servers, false) => Panel::Php,
-            (Panel::Vhosts, false) => Panel::Servers,
+            (Panel::Php, true) => Panel::Services,
+            (Panel::Services, true) => Panel::Servers,
+            (Panel::Servers, false) => Panel::Services,
+            (Panel::Services, false) => Panel::Php,
             (Panel::Php, false) => Panel::Vhosts,
+            (Panel::Vhosts, false) => Panel::Servers,
         };
     }
 
@@ -326,6 +406,10 @@ impl App {
             .map(|p| p.version.clone())
     }
 
+    fn selected_service(&self) -> Option<crate::state::ServiceKind> {
+        self.state.services.get(self.sel_service).map(|s| s.kind)
+    }
+
     fn selected_vhost_name(&self) -> Option<String> {
         self.state
             .vhosts
@@ -350,7 +434,19 @@ pub fn snapshot(width: u16, height: u16, modal: &str) -> Result<String> {
             })
         }
         "ext" => open_ext_modal(&mut app),
+        "phpsettings" => open_php_settings(&mut app),
+        "service" => app.service_picker = Some(ServicePicker { sel: 0 }),
         "config" => open_config_modal(&mut app),
+        "log" => {
+            app.log_modal = Some(LogModal {
+                label: "server-caddy".into(),
+                lines: vec![
+                    "[caddy] serving on :80".into(),
+                    "[caddy] tls handshake ok".into(),
+                ],
+                scroll: 0,
+            })
+        }
         _ => {}
     }
     let backend = ratatui::backend::TestBackend::new(width, height);
@@ -412,6 +508,21 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) ->
             run_ext_suspended(terminal, app, pe)?;
         }
 
+        // Enabling Xdebug may need to build it via pecl — same suspend treatment.
+        if let Some((ver, mode)) = app.pending_xdebug.take() {
+            run_xdebug_suspended(terminal, app, &ver, mode)?;
+        }
+
+        // Starting a service may need a (slow) brew install — same treatment.
+        if let Some(kind) = app.pending_service.take() {
+            run_service_start_suspended(terminal, app, kind)?;
+        }
+
+        // Starting a server may need to install its backend — same treatment.
+        if let Some(name) = app.pending_server.take() {
+            run_server_start_suspended(terminal, app, &name)?;
+        }
+
         if app.should_quit {
             return Ok(());
         }
@@ -456,6 +567,18 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         handle_config_key(app, code);
         return;
     }
+    if app.php_settings.is_some() {
+        handle_php_settings_key(app, code);
+        return;
+    }
+    if app.service_picker.is_some() {
+        handle_service_picker_key(app, code);
+        return;
+    }
+    if app.log_modal.is_some() {
+        handle_log_key(app, code);
+        return;
+    }
     match code {
         KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
         KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => app.should_quit = true,
@@ -467,20 +590,23 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Down | KeyCode::Char('j') | KeyCode::Right | KeyCode::Char('l') => app.move_sel(1),
         KeyCode::Enter => match app.focus {
             // Enter activates: starts a server / restarts a PHP FPM master.
-            Panel::Servers => {
-                if let Some(name) = app.selected_server_name() {
-                    let r = ops::start_server(&name)
-                        .map(|st| format!("started '{name}' — {}", st.as_str()));
-                    app.act("start", r);
-                }
-            }
+            Panel::Servers => start_selected_server(app),
             Panel::Php => restart_selected_fpm(app),
             Panel::Vhosts => {}
+            Panel::Services => start_selected_service(app),
         },
         KeyCode::Char('s') if app.focus == Panel::Servers => open_settings(app),
+        KeyCode::Char('s') if app.focus == Panel::Php => open_php_settings(app),
         KeyCode::Char('x') if app.focus == Panel::Servers => {
             if let Some(name) = app.selected_server_name() {
                 let r = ops::stop_server(&name).map(|_| format!("stopped '{name}'"));
+                app.act("stop", r);
+            }
+        }
+        KeyCode::Char('x') if app.focus == Panel::Php => toggle_xdebug(app),
+        KeyCode::Char('x') if app.focus == Panel::Services => {
+            if let Some(kind) = app.selected_service() {
+                let r = ops::stop_service(kind).map(|_| format!("stopped '{kind}'"));
                 app.act("stop", r);
             }
         }
@@ -504,6 +630,13 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                     app.confirm_remove = Some(name);
                 }
             }
+            Panel::Services => {
+                if let Some(kind) = app.selected_service() {
+                    let r = ops::restart_service(kind)
+                        .map(|st| format!("restarted '{kind}' — {}", st.as_str()));
+                    app.act("restart", r);
+                }
+            }
         },
         KeyCode::Char('a') => {
             let r = apply_all().map(|n| format!("applied {n} server(s)"));
@@ -519,8 +652,10 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                     error: None,
                 })
             }
+            Panel::Services => app.service_picker = Some(ServicePicker { sel: 0 }),
         },
         KeyCode::Char('v') => validate_all(app),
+        KeyCode::Char('L') => open_log(app),
         KeyCode::Char('c') => open_config_modal(app),
         KeyCode::Delete | KeyCode::Backspace => match app.focus {
             // Remove the focused item (always behind a confirm).
@@ -539,6 +674,12 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                     app.confirm_remove_php = Some(ver);
                 }
             }
+            Panel::Services => {
+                if let Some(kind) = app.selected_service() {
+                    let r = ops::remove_service(kind).map(|_| format!("removed '{kind}'"));
+                    app.act("remove", r);
+                }
+            }
         },
         KeyCode::Char('d') if app.focus == Panel::Php => {
             if let Some(ver) = app.selected_php_version() {
@@ -550,6 +691,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             Panel::Vhosts => open_edit_wizard(app),
             Panel::Servers => open_edit_server(app),
             Panel::Php => open_ext_modal(app),
+            Panel::Services => {}
         },
         KeyCode::Char('D') => {
             let tlds = app.config.local_tlds.clone();
@@ -572,6 +714,54 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             // The admin dialog can disturb the terminal — force a clean repaint.
             app.force_clear = true;
         }
+        _ => {}
+    }
+}
+
+/// Open the read-only log viewer for the focused row's service. Vhosts show
+/// their owning server's log (vhosts don't have a log of their own).
+fn open_log(app: &mut App) {
+    let label = match app.focus {
+        Panel::Servers => app.selected_server_name().map(|n| format!("server-{n}")),
+        Panel::Php => app.selected_php_version().map(|v| format!("php-{v}")),
+        Panel::Vhosts => app
+            .state
+            .vhosts
+            .get(app.sel_vhost)
+            .map(|v| format!("server-{}", v.server)),
+        Panel::Services => app.selected_service().map(crate::services::service_id),
+    };
+    let Some(label) = label else {
+        app.message = "nothing selected to show a log for".into();
+        return;
+    };
+    match logs::resolve(&app.state, &label) {
+        Ok(path) => {
+            let lines = logs::tail_lines(&path, LOG_TAIL_LINES);
+            app.log_modal = Some(LogModal {
+                label,
+                lines,
+                scroll: 0,
+            });
+        }
+        Err(e) => app.message = format!("✗ log: {e}"),
+    }
+}
+
+/// Scroll / close the log viewer.
+fn handle_log_key(app: &mut App, code: KeyCode) {
+    let Some(m) = app.log_modal.as_mut() else {
+        return;
+    };
+    let max = m.lines.len().saturating_sub(1);
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('L') => app.log_modal = None,
+        KeyCode::Up | KeyCode::Char('k') => m.scroll = m.scroll.saturating_sub(1),
+        KeyCode::Down | KeyCode::Char('j') => m.scroll = (m.scroll + 1).min(max),
+        KeyCode::PageUp => m.scroll = m.scroll.saturating_sub(20),
+        KeyCode::PageDown => m.scroll = (m.scroll + 20).min(max),
+        KeyCode::Home => m.scroll = 0,
+        KeyCode::End => m.scroll = max,
         _ => {}
     }
 }
@@ -1095,12 +1285,187 @@ fn submit_settings(app: &mut App) {
     }
 }
 
+/// Open the per-version php.ini / OPcache / FPM settings modal.
+fn open_php_settings(app: &mut App) {
+    let Some(p) = app.state.php_versions.get(app.sel_php).cloned() else {
+        return;
+    };
+    let values = php::php_settings_defs()
+        .iter()
+        .map(|d| p.setting(d.key, d.default).to_string())
+        .collect();
+    app.php_settings = Some(PhpSettingsModal {
+        version: p.version,
+        values,
+        field: 0,
+        error: None,
+    });
+}
+
+fn handle_php_settings_key(app: &mut App, code: KeyCode) {
+    let n = php::php_settings_defs().len().max(1);
+    let m = app.php_settings.as_mut().unwrap();
+    match code {
+        KeyCode::Esc => app.php_settings = None,
+        KeyCode::Enter => submit_php_settings(app),
+        KeyCode::Tab | KeyCode::Down => m.field = (m.field + 1) % n,
+        KeyCode::BackTab | KeyCode::Up => m.field = (m.field + n - 1) % n,
+        KeyCode::Backspace => {
+            if let Some(v) = m.values.get_mut(m.field) {
+                v.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(v) = m.values.get_mut(m.field) {
+                v.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn submit_php_settings(app: &mut App) {
+    let m = app.php_settings.as_ref().unwrap();
+    let version = m.version.clone();
+    let values = m.values.clone();
+    let defs = php::php_settings_defs();
+
+    let result = (|| -> Result<()> {
+        let mut state = load_state()?;
+        let php_rec = state
+            .php_versions
+            .iter_mut()
+            .find(|p| p.version == version)
+            .ok_or_else(|| anyhow::anyhow!("PHP {version} not found"))?;
+        for (def, val) in defs.iter().zip(values.iter()) {
+            let val = val.trim();
+            // Store only non-default values to keep state minimal.
+            if val.is_empty() || val == def.default {
+                php_rec.settings.remove(def.key);
+            } else {
+                php_rec
+                    .settings
+                    .insert(def.key.to_string(), val.to_string());
+            }
+        }
+        let record = php_rec.clone();
+        crate::state::save_state(&state)?;
+        let brew = Brew::detect()?;
+        php::ensure_fpm_running(&brew, &record)
+    })();
+
+    match result {
+        Ok(()) => {
+            app.php_settings = None;
+            app.message = format!("✓ saved PHP {version} settings (FPM restarted)");
+            app.refresh();
+        }
+        Err(e) => {
+            if let Some(m) = app.php_settings.as_mut() {
+                m.error = Some(e.to_string());
+            }
+        }
+    }
+}
+
+/// Cycle Xdebug off → debug → profile for the selected version. If enabling
+/// needs a pecl install, defer to the suspended runner so output is visible.
+fn toggle_xdebug(app: &mut App) {
+    let Some(p) = app.state.php_versions.get(app.sel_php).cloned() else {
+        return;
+    };
+    let next = p.xdebug.next();
+    // Enabling for the first time may require building Xdebug — do it suspended.
+    let needs_install = !next.is_off()
+        && Brew::detect()
+            .and_then(|b| php::extensions::is_loaded(&b, &p.version, "xdebug"))
+            .map(|loaded| !loaded)
+            .unwrap_or(true);
+    if needs_install {
+        app.pending_xdebug = Some((p.version.clone(), next));
+        app.message = format!("installing Xdebug for PHP {}…", p.version);
+    } else {
+        let r = ops::set_xdebug(&p.version, next)
+            .map(|_| format!("PHP {} Xdebug {}", p.version, next.as_str()));
+        app.act("xdebug", r);
+    }
+}
+
 fn restart_selected_fpm(app: &mut App) {
     if let Some(ver) = app.selected_php_version() {
-        let r = Brew::detect()
-            .and_then(|brew| php::ensure_fpm_running(&brew, &ver))
-            .map(|_| format!("restarted PHP {ver} FPM"));
+        let r = ops::restart_fpm(&ver).map(|_| format!("restarted PHP {ver} FPM"));
         app.act("php restart", r);
+    }
+}
+
+/// Start the selected server. If its backend's brew formula isn't installed yet,
+/// defer to the suspended runner so the (slow) install output is visible.
+fn start_selected_server(app: &mut App) {
+    let Some(name) = app.selected_server_name() else {
+        return;
+    };
+    let installed = app
+        .state
+        .get_server(&name)
+        .map(|s| crate::backends::backend_for(s.backend).formula())
+        .and_then(|formula| Brew::detect().ok().map(|brew| brew.is_installed(formula)))
+        .unwrap_or(false);
+    if installed {
+        let r = ops::start_server(&name).map(|st| format!("started '{name}' — {}", st.as_str()));
+        app.act("start", r);
+    } else {
+        app.pending_server = Some(name);
+        app.message = "installing web server backend…".into();
+    }
+}
+
+/// Start the selected service. If its brew formula isn't installed yet, defer to
+/// the suspended runner so the (slow) install output is visible.
+fn start_selected_service(app: &mut App) {
+    let Some(kind) = app.selected_service() else {
+        return;
+    };
+    let installed = Brew::detect()
+        .map(|b| crate::services::is_installed(&b, kind))
+        .unwrap_or(false);
+    if installed {
+        let r = ops::start_service(kind).map(|st| format!("started '{kind}' — {}", st.as_str()));
+        app.act("start", r);
+    } else {
+        app.pending_service = Some(kind);
+        app.message = format!("installing {kind}…");
+    }
+}
+
+/// Pick a service kind to add, then queue its (possibly slow) start.
+fn handle_service_picker_key(app: &mut App, code: KeyCode) {
+    let kinds = crate::state::ServiceKind::all();
+    let m = app.service_picker.as_mut().unwrap();
+    match code {
+        KeyCode::Esc => app.service_picker = None,
+        KeyCode::Up | KeyCode::Char('k') => m.sel = (m.sel + kinds.len() - 1) % kinds.len(),
+        KeyCode::Down | KeyCode::Char('j') => m.sel = (m.sel + 1) % kinds.len(),
+        KeyCode::Enter => {
+            let kind = kinds[m.sel];
+            app.service_picker = None;
+            // Register, then start (the start path installs if needed).
+            if let Err(e) = ops::add_service(kind) {
+                app.message = format!("✗ add service: {e}");
+                return;
+            }
+            let installed = Brew::detect()
+                .map(|b| crate::services::is_installed(&b, kind))
+                .unwrap_or(false);
+            if installed {
+                let r = ops::start_service(kind)
+                    .map(|st| format!("started '{kind}' — {}", st.as_str()));
+                app.act("start", r);
+            } else {
+                app.pending_service = Some(kind);
+                app.message = format!("installing {kind}…");
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1196,6 +1561,8 @@ fn open_wizard(app: &mut App) {
         editing: None,
         dropdown_open: true,
         path_sel: None,
+        preset: Framework::Generic,
+        proxy_target: None,
     });
 }
 
@@ -1227,6 +1594,8 @@ fn open_edit_wizard(app: &mut App) {
         editing: Some(v.server_name),
         dropdown_open: true,
         path_sel: None,
+        preset: v.preset,
+        proxy_target: v.proxy_target,
     });
 }
 
@@ -1294,7 +1663,7 @@ fn handle_wizard_key(app: &mut App, code: KeyCode) {
         },
         KeyCode::Char(' ') => match w.field {
             0 => w.server_name.push(' '),
-            2 | 3 => wizard_adjust(w, php_len, srv_len, true),
+            2 | 3 | 5 => wizard_adjust(w, php_len, srv_len, true),
             4 => w.ssl = !w.ssl,
             _ => {}
         },
@@ -1364,6 +1733,11 @@ fn wizard_adjust(w: &mut VhostWizard, php_len: usize, srv_len: usize, forward: b
         2 => w.php_idx = step(w.php_idx, php_len),
         3 => w.server_idx = step(w.server_idx, srv_len),
         4 => w.ssl = !w.ssl,
+        5 => {
+            let all = Framework::all();
+            let cur = all.iter().position(|f| *f == w.preset).unwrap_or(0);
+            w.preset = all[step(cur, all.len())];
+        }
         _ => {}
     }
 }
@@ -1378,6 +1752,8 @@ fn submit_wizard(app: &mut App) {
         .map(|p| p.version.clone());
     let server = app.state.servers.get(w.server_idx).map(|s| s.name.clone());
     let ssl = w.ssl;
+    let preset = w.preset;
+    let proxy_target = w.proxy_target.clone();
     let raw_root = w.docroot.trim();
     let docroot = if raw_root.is_empty() {
         format!("{}/{}", app.config.sites_root.trim_end_matches('/'), name)
@@ -1418,6 +1794,8 @@ fn submit_wizard(app: &mut App) {
             docroot: docroot.clone(),
             php_version: php.clone(),
             ssl,
+            preset,
+            proxy_target,
         })?;
         crate::state::save_state(&state)
     })();
@@ -1521,13 +1899,122 @@ fn run_ext_suspended(
     Ok(())
 }
 
+/// Suspend the TUI, enable Xdebug (building it via pecl if needed) with visible
+/// output, wait for a keypress, then resume the dashboard.
+fn run_xdebug_suspended(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut App,
+    version: &str,
+    mode: XdebugMode,
+) -> Result<()> {
+    restore_terminal(terminal)?;
+    println!(
+        "\n── Enabling Xdebug ({}) for PHP {version} ──\n",
+        mode.as_str()
+    );
+    let result = ops::set_xdebug(version, mode);
+    match &result {
+        Ok(()) => println!(
+            "\n✓ Xdebug {} for PHP {version}. Press any key to return…",
+            mode.as_str()
+        ),
+        Err(e) => println!("\n✗ {e}\nPress any key to return…"),
+    }
+    let _ = enable_raw_mode();
+    loop {
+        if event::poll(Duration::from_millis(500))? {
+            if let Event::Key(k) = event::read()? {
+                if k.kind == KeyEventKind::Press {
+                    break;
+                }
+            }
+        }
+    }
+    let _ = disable_raw_mode();
+    *terminal = setup_terminal()?;
+    app.message = match result {
+        Ok(()) => format!("✓ PHP {version} Xdebug {}", mode.as_str()),
+        Err(e) => format!("✗ xdebug: {e}"),
+    };
+    app.refresh();
+    Ok(())
+}
+
+/// Suspend the TUI, install the backend (if needed) + start a server with
+/// visible output, wait for a keypress, then resume the dashboard.
+fn run_server_start_suspended(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut App,
+    name: &str,
+) -> Result<()> {
+    restore_terminal(terminal)?;
+    println!("\n── Installing backend + starting '{name}' ──\n");
+    let result = ops::start_server(name);
+    match &result {
+        Ok(st) => println!("\n✓ '{name}' — {}. Press any key to return…", st.as_str()),
+        Err(e) => println!("\n✗ {e}\nPress any key to return…"),
+    }
+    let _ = enable_raw_mode();
+    loop {
+        if event::poll(Duration::from_millis(500))? {
+            if let Event::Key(k) = event::read()? {
+                if k.kind == KeyEventKind::Press {
+                    break;
+                }
+            }
+        }
+    }
+    let _ = disable_raw_mode();
+    *terminal = setup_terminal()?;
+    app.message = match result {
+        Ok(st) => format!("✓ '{name}' — {}", st.as_str()),
+        Err(e) => format!("✗ {name}: {e}"),
+    };
+    app.refresh();
+    Ok(())
+}
+
+/// Suspend the TUI, install (if needed) + start a service with visible output,
+/// wait for a keypress, then resume the dashboard.
+fn run_service_start_suspended(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut App,
+    kind: crate::state::ServiceKind,
+) -> Result<()> {
+    restore_terminal(terminal)?;
+    println!("\n── Installing + starting {kind} ──\n");
+    let result = ops::start_service(kind);
+    match &result {
+        Ok(st) => println!("\n✓ {kind} — {}. Press any key to return…", st.as_str()),
+        Err(e) => println!("\n✗ {e}\nPress any key to return…"),
+    }
+    let _ = enable_raw_mode();
+    loop {
+        if event::poll(Duration::from_millis(500))? {
+            if let Event::Key(k) = event::read()? {
+                if k.kind == KeyEventKind::Press {
+                    break;
+                }
+            }
+        }
+    }
+    let _ = disable_raw_mode();
+    *terminal = setup_terminal()?;
+    app.message = match result {
+        Ok(st) => format!("✓ {kind} — {}", st.as_str()),
+        Err(e) => format!("✗ {kind}: {e}"),
+    };
+    app.refresh();
+    Ok(())
+}
+
 /// The actual pecl call + FPM restart for a queued extension op.
 fn run_ext_op(pe: &PendingExt) -> Result<String> {
     let brew = Brew::detect()?;
     match &pe.action {
         ExtAction::Add(name) => {
             php::extensions::add(&brew, &pe.version, name)?;
-            php::ensure_fpm_running(&brew, &pe.version)?;
+            ops::restart_fpm(&pe.version)?;
             Ok(format!(
                 "{name} installed for PHP {} (FPM restarted)",
                 pe.version
@@ -1535,7 +2022,7 @@ fn run_ext_op(pe: &PendingExt) -> Result<String> {
         }
         ExtAction::Remove(name) => {
             php::extensions::remove(&brew, &pe.version, name)?;
-            php::ensure_fpm_running(&brew, &pe.version)?;
+            ops::restart_fpm(&pe.version)?;
             Ok(format!(
                 "{name} removed from PHP {} (FPM restarted)",
                 pe.version

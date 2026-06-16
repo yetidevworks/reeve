@@ -4,9 +4,14 @@ mod cli;
 mod config;
 mod daemon;
 mod dns;
+mod doctor;
+mod logs;
 mod ops;
+mod park;
 mod paths;
 mod php;
+mod preset;
+mod services;
 mod ssl;
 mod state;
 mod tui;
@@ -16,7 +21,10 @@ mod vhost;
 use anyhow::Result;
 use backends::{backend_for, server_service_id};
 use clap::Parser;
-use cli::{Cli, Commands, DnsCommands, PhpCommands, ServerCommands, SslCommands, VhostCommands};
+use cli::{
+    Cli, Commands, DnsCommands, ParkCommands, PhpCommands, ServerCommands, ServiceCommands,
+    SslCommands, VhostCommands,
+};
 use config::{load_config, save_config, Config};
 use state::{load_state, save_state, Backend, Server, Vhost};
 use std::str::FromStr;
@@ -38,10 +46,18 @@ async fn main() -> Result<()> {
         Some(Commands::Php(c)) => cmd_php(c),
         Some(Commands::Server(c)) => cmd_server(c),
         Some(Commands::Vhost(c)) => cmd_vhost(c),
+        Some(Commands::Service(c)) => cmd_service(c),
+        Some(Commands::Park(c)) => cmd_park(c),
         Some(Commands::Apply) => cmd_apply(),
         Some(Commands::Validate) => cmd_validate(),
         Some(Commands::Ssl(c)) => cmd_ssl(c),
         Some(Commands::Dns(c)) => cmd_dns(c),
+        Some(Commands::Logs {
+            target,
+            lines,
+            follow,
+        }) => cmd_logs(target, lines, follow),
+        Some(Commands::Doctor) => cmd_doctor(),
         Some(Commands::TuiSnapshot {
             width,
             height,
@@ -94,6 +110,57 @@ fn cmd_dns(c: DnsCommands) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn cmd_logs(target: Option<String>, lines: usize, follow: bool) -> Result<()> {
+    let state = load_state().unwrap_or_default();
+    let Some(target) = target else {
+        println!("Available logs:");
+        for t in logs::targets(&state)? {
+            let where_ = if t.path.exists() {
+                t.path.display().to_string()
+            } else {
+                "(no log yet)".to_string()
+            };
+            println!("  {:<16} {}", t.label, where_);
+        }
+        println!("\nView one with `reeve logs <target> [-n N] [--follow]`.");
+        return Ok(());
+    };
+    let path = logs::resolve(&state, &target)?;
+    if follow {
+        logs::follow(&path, lines)
+    } else {
+        logs::tail(&path, lines)
+    }
+}
+
+fn cmd_doctor() -> Result<()> {
+    let brew = brew::Brew::detect().ok();
+    let cfg = load_config().unwrap_or_default();
+    let state = load_state().unwrap_or_default();
+    let checks = doctor::run(brew.as_ref(), &cfg, &state);
+    for c in &checks {
+        println!("{} {:<14} {}", c.health.symbol(), c.name, c.detail);
+    }
+    let (mut warn, mut fail) = (0, 0);
+    for c in &checks {
+        match c.health {
+            doctor::Health::Warn => warn += 1,
+            doctor::Health::Fail => fail += 1,
+            doctor::Health::Ok => {}
+        }
+    }
+    println!();
+    if fail > 0 {
+        anyhow::bail!("{fail} check(s) failed, {warn} warning(s)");
+    }
+    if warn > 0 {
+        println!("All critical checks passed ({warn} warning(s)).");
+    } else {
+        println!("All checks passed.");
+    }
+    Ok(())
 }
 
 fn cmd_init() -> Result<()> {
@@ -180,6 +247,43 @@ fn cmd_php(c: PhpCommands) -> Result<()> {
             Ok(())
         }
         PhpCommands::Ext(ext) => cmd_php_ext(ext),
+        PhpCommands::Settings { version } => {
+            let state = load_state()?;
+            let php = state
+                .get_php(&version)
+                .ok_or_else(|| anyhow::anyhow!("PHP {version} is not managed"))?;
+            println!("PHP {version} settings (★ = overridden):");
+            println!("{:<28} {:<12} DEFAULT", "KEY", "VALUE");
+            for def in php::php_settings_defs() {
+                let val = php.setting(def.key, def.default);
+                let overridden = php.settings.contains_key(def.key);
+                println!(
+                    "{}{:<27} {:<12} {}",
+                    if overridden { "★" } else { " " },
+                    def.key,
+                    val,
+                    def.default
+                );
+            }
+            println!("Xdebug: {} (port {})", php.xdebug.as_str(), php.xdebug_port);
+            Ok(())
+        }
+        PhpCommands::Set {
+            version,
+            key,
+            value,
+        } => {
+            ops::set_php_setting(&version, &key, &value)?;
+            println!("✓ PHP {version}: {key} = {value} (FPM restarted)");
+            Ok(())
+        }
+        PhpCommands::Xdebug { version, mode } => {
+            brew::Brew::detect_or_offer_install()?;
+            let mode = state::XdebugMode::from_str(&mode)?;
+            ops::set_xdebug(&version, mode)?;
+            println!("✓ PHP {version}: Xdebug {} (FPM restarted)", mode.as_str());
+            Ok(())
+        }
     }
 }
 
@@ -204,7 +308,7 @@ fn cmd_php_ext(ext: cli::ExtCommands) -> Result<()> {
                 return Ok(());
             }
             php::extensions::add(&brew, &version, &name)?;
-            php::ensure_fpm_running(&brew, &version)?;
+            ops::restart_fpm(&version)?;
             let loaded = php::extensions::list(&brew, &version)?
                 .iter()
                 .any(|m| m.eq_ignore_ascii_case(&name));
@@ -220,7 +324,7 @@ fn cmd_php_ext(ext: cli::ExtCommands) -> Result<()> {
         }
         ExtCommands::Remove { version, name } => {
             php::extensions::remove(&brew, &version, &name)?;
-            php::ensure_fpm_running(&brew, &version)?;
+            ops::restart_fpm(&version)?;
             println!("✓ {name} removed from PHP {version} (FPM restarted)");
             Ok(())
         }
@@ -249,6 +353,10 @@ fn cmd_server(c: ServerCommands) -> Result<()> {
                 settings: Default::default(),
             })?;
             save_state(&state)?;
+            // Install the backend's brew formula now (visible), rather than
+            // letting the first `apply`/`start` stall silently on it.
+            let brew = brew::Brew::detect_or_offer_install()?;
+            backend_for(backend).ensure_installed(&brew)?;
             println!("✓ Added {backend} server '{name}' (http:{http} https:{https})");
             println!("  Run `reeve apply` to render and start it.");
             Ok(())
@@ -314,7 +422,10 @@ fn cmd_vhost(c: VhostCommands) -> Result<()> {
             php,
             server,
             ssl,
+            preset,
+            proxy,
         } => {
+            let preset = state::Framework::from_str(&preset)?;
             let mut state = load_state()?;
             state.add_vhost(Vhost {
                 server_name: server_name.clone(),
@@ -322,6 +433,8 @@ fn cmd_vhost(c: VhostCommands) -> Result<()> {
                 docroot: root,
                 php_version: php,
                 ssl,
+                preset,
+                proxy_target: proxy,
             })?;
             save_state(&state)?;
             println!("✓ Added vhost '{server_name}'");
@@ -334,13 +447,14 @@ fn cmd_vhost(c: VhostCommands) -> Result<()> {
                 println!("No vhosts. Run `reeve vhost add <host> ...`.");
             } else {
                 println!(
-                    "{:<22} {:<12} {:<6} {:<5} DOCROOT",
-                    "HOST", "SERVER", "PHP", "SSL"
+                    "{:<22} {:<12} {:<6} {:<5} {:<9} TARGET",
+                    "HOST", "SERVER", "PHP", "SSL", "PRESET"
                 );
                 for v in &state.vhosts {
+                    let target = v.proxy_target.clone().unwrap_or_else(|| v.docroot.clone());
                     println!(
-                        "{:<22} {:<12} {:<6} {:<5} {}",
-                        v.server_name, v.server, v.php_version, v.ssl, v.docroot
+                        "{:<22} {:<12} {:<6} {:<5} {:<9} {}",
+                        v.server_name, v.server, v.php_version, v.ssl, v.preset, target
                     );
                 }
             }
@@ -360,6 +474,151 @@ fn cmd_vhost(c: VhostCommands) -> Result<()> {
     }
 }
 
+fn cmd_service(c: ServiceCommands) -> Result<()> {
+    use state::ServiceKind;
+    match c {
+        ServiceCommands::Add { kind } => {
+            let kind = ServiceKind::from_str(&kind)?;
+            ops::add_service(kind)?;
+            println!("✓ Added service '{kind}' — `reeve service start {kind}` to run it.");
+            Ok(())
+        }
+        ServiceCommands::Start { kind } => {
+            brew::Brew::detect_or_offer_install()?;
+            let kind = ServiceKind::from_str(&kind)?;
+            let status = ops::start_service(kind)?;
+            println!(
+                "✓ Started '{kind}' on :{} — {}",
+                services::port(kind),
+                status.as_str()
+            );
+            Ok(())
+        }
+        ServiceCommands::Stop { kind } => {
+            let kind = ServiceKind::from_str(&kind)?;
+            ops::stop_service(kind)?;
+            println!("✓ Stopped '{kind}'");
+            Ok(())
+        }
+        ServiceCommands::Restart { kind } => {
+            let kind = ServiceKind::from_str(&kind)?;
+            let status = ops::restart_service(kind)?;
+            println!("✓ Restarted '{kind}' — {}", status.as_str());
+            Ok(())
+        }
+        ServiceCommands::Remove { kind } => {
+            let kind = ServiceKind::from_str(&kind)?;
+            ops::remove_service(kind)?;
+            println!("✓ Removed service '{kind}'");
+            Ok(())
+        }
+        ServiceCommands::List => {
+            let state = load_state()?;
+            if state.services.is_empty() {
+                println!(
+                    "No services. Add one with `reeve service add <mysql|mariadb|postgres|redis|memcached|mailpit>`."
+                );
+                return Ok(());
+            }
+            println!("{:<12} {:<7} {:<9} STATUS", "SERVICE", "PORT", "ENABLED");
+            for s in &state.services {
+                let status = daemon::status(&services::service_id(s.kind));
+                println!(
+                    "{:<12} {:<7} {:<9} {}",
+                    s.kind,
+                    services::port(s.kind),
+                    if s.enabled { "yes" } else { "no" },
+                    status.as_str()
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+fn cmd_park(c: ParkCommands) -> Result<()> {
+    match c {
+        ParkCommands::Add {
+            dir,
+            server,
+            php,
+            tld,
+            ssl,
+        } => {
+            let cfg = load_config()?;
+            let root = expand_tilde(&dir);
+            if !std::path::Path::new(&root).is_dir() {
+                anyhow::bail!("'{root}' is not a directory");
+            }
+            let mut state = load_state()?;
+            if state.get_server(&server).is_none() {
+                anyhow::bail!("Server '{server}' does not exist");
+            }
+            if state.get_php(&php).is_none() {
+                anyhow::bail!("PHP {php} is not installed. Run `reeve php install {php}`.");
+            }
+            let tld = tld.unwrap_or_else(|| cfg.local_tlds[0].clone());
+            state.parks.retain(|p| p.root != root);
+            state.parks.push(state::Park {
+                root: root.clone(),
+                server,
+                php_version: php,
+                tld: tld.clone(),
+                ssl,
+            });
+            save_state(&state)?;
+            let n = park::expand(state.parks.last().unwrap()).len();
+            println!("✓ Parked {root} → *.{tld} ({n} site(s) found)");
+            println!("  Run `reeve apply` to render and reload.");
+            Ok(())
+        }
+        ParkCommands::Remove { dir } => {
+            let root = expand_tilde(&dir);
+            let mut state = load_state()?;
+            let before = state.parks.len();
+            state.parks.retain(|p| p.root != root);
+            if state.parks.len() == before {
+                anyhow::bail!("'{root}' is not parked");
+            }
+            save_state(&state)?;
+            println!("✓ Unparked {root} — run `reeve apply` to drop its sites");
+            Ok(())
+        }
+        ParkCommands::List => {
+            let state = load_state()?;
+            if state.parks.is_empty() {
+                println!("No parked directories. Park one with `reeve park add <dir> --server <s> --php <v>`.");
+                return Ok(());
+            }
+            for p in &state.parks {
+                let sites = park::expand(p);
+                println!(
+                    "{}  → *.{}  ({}, PHP {}, {})",
+                    p.root,
+                    p.tld,
+                    p.server,
+                    p.php_version,
+                    if p.ssl { "https" } else { "http" }
+                );
+                for v in sites {
+                    println!("    {}  {}", v.server_name, v.docroot);
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Expand a leading `~` to the user's home directory.
+fn expand_tilde(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest).display().to_string();
+        }
+    }
+    path.to_string()
+}
+
 fn cmd_apply() -> Result<()> {
     let brew = brew::Brew::detect()?;
     let cfg = load_config()?;
@@ -371,7 +630,8 @@ fn cmd_apply() -> Result<()> {
     for server in &state.servers {
         let backend = backend_for(server.backend);
         backend.ensure_installed(&brew)?;
-        let vhosts = state.vhosts_for(&server.name);
+        let vhosts_owned = park::effective_vhosts_for(&state, &server.name);
+        let vhosts: Vec<&Vhost> = vhosts_owned.iter().collect();
         ops::ensure_vhost_certs(&vhosts, &brew)?;
         // The default site's HTTPS catch-all needs a `localhost` cert.
         if server.default_site && !ssl::exists(backends::DEFAULT_SITE_HOST) {

@@ -7,8 +7,12 @@ use crate::brew::Brew;
 use crate::config::{load_config, save_config};
 use crate::daemon::{self, Status};
 use crate::php;
+use crate::services;
 use crate::ssl;
-use crate::state::{load_state, save_state, Server, Vhost};
+use crate::state::{
+    load_state, save_state, ManagedServiceInstance, PhpVersion as Php, Server, ServiceKind, Vhost,
+    XdebugMode,
+};
 use anyhow::{anyhow, bail, Result};
 
 /// Fetch a server from state by name, or error.
@@ -38,14 +42,16 @@ pub fn ensure_vhost_certs(vhosts: &[&Vhost], brew: &Brew) -> Result<()> {
     Ok(())
 }
 
-/// Render + validate one server's native config from current state.
+/// Render + validate one server's native config from current state. Includes
+/// any parked subfolders pointed at this server (Valet-style).
 pub fn render_server(server: &Server) -> Result<()> {
     let brew = Brew::detect()?;
     let cfg = load_config()?;
     let state = load_state()?;
     let backend = backend_for(server.backend);
     backend.ensure_installed(&brew)?;
-    let vhosts = state.vhosts_for(&server.name);
+    let vhosts_owned = crate::park::effective_vhosts_for(&state, &server.name);
+    let vhosts: Vec<&Vhost> = vhosts_owned.iter().collect();
     ensure_vhost_certs(&vhosts, &brew)?;
     // The default site's HTTPS catch-all needs a `localhost` cert.
     if server.default_site && !ssl::exists(crate::backends::DEFAULT_SITE_HOST) {
@@ -117,6 +123,121 @@ pub fn remove_php(version: &str) -> Result<()> {
         save_config(&cfg)?;
     }
     Ok(())
+}
+
+/// Restart a version's FPM master, applying its persisted php.ini / OPcache /
+/// pool / Xdebug settings. Falls back to defaults if the version isn't yet in
+/// state (e.g. mid-install).
+pub fn restart_fpm(version: &str) -> Result<()> {
+    let brew = Brew::detect()?;
+    let state = load_state()?;
+    let record = state.get_php(version).cloned().unwrap_or_else(|| Php {
+        version: version.to_string(),
+        fpm_socket: php::fpm_socket(version)
+            .map(|p| p.display().to_string())
+            .unwrap_or_default(),
+        ..Default::default()
+    });
+    php::ensure_fpm_running(&brew, &record)
+}
+
+/// Set one php.ini / OPcache / FPM setting for a version, persist, and restart
+/// the FPM master so it takes effect.
+pub fn set_php_setting(version: &str, key: &str, value: &str) -> Result<()> {
+    if !php::php_settings_defs().iter().any(|d| d.key == key) {
+        bail!("Unknown PHP setting '{key}'. See `reeve php settings {version}`.");
+    }
+    let mut state = load_state()?;
+    let rec = state
+        .php_versions
+        .iter_mut()
+        .find(|p| p.version == version)
+        .ok_or_else(|| anyhow!("PHP {version} is not managed"))?;
+    rec.settings.insert(key.to_string(), value.to_string());
+    let record = rec.clone();
+    save_state(&state)?;
+    let brew = Brew::detect()?;
+    php::ensure_fpm_running(&brew, &record)
+}
+
+/// Set Xdebug mode for a version, install Xdebug via pecl if enabling and it's
+/// missing, persist, and restart the FPM master. Slow when an install is needed.
+pub fn set_xdebug(version: &str, mode: XdebugMode) -> Result<()> {
+    let brew = Brew::detect()?;
+    if !mode.is_off() && !php::extensions::is_loaded(&brew, version, "xdebug")? {
+        php::extensions::add(&brew, version, "xdebug")?;
+    }
+    let mut state = load_state()?;
+    let php_rec = state
+        .php_versions
+        .iter_mut()
+        .find(|p| p.version == version)
+        .ok_or_else(|| anyhow!("PHP {version} is not managed"))?;
+    php_rec.xdebug = mode;
+    let record = php_rec.clone();
+    save_state(&state)?;
+    php::ensure_fpm_running(&brew, &record)
+}
+
+/// Add a managed service to state (does not start it). Idempotent.
+pub fn add_service(kind: ServiceKind) -> Result<()> {
+    let mut state = load_state()?;
+    if state.get_service(kind).is_none() {
+        state.services.push(ManagedServiceInstance {
+            kind,
+            enabled: false,
+        });
+        save_state(&state)?;
+    }
+    Ok(())
+}
+
+/// Ensure a service is installed, stand up its launchd master, and mark it
+/// enabled. Registers it in state first if absent. Slow when a brew install
+/// is needed.
+pub fn start_service(kind: ServiceKind) -> Result<Status> {
+    let brew = Brew::detect()?;
+    services::ensure_installed(&brew, kind)?;
+    let spec = services::service_spec(&brew, kind)?;
+    daemon::install(&spec)?;
+    daemon::restart(&services::service_id(kind))?;
+    let mut state = load_state()?;
+    match state.services.iter_mut().find(|s| s.kind == kind) {
+        Some(s) => s.enabled = true,
+        None => state.services.push(ManagedServiceInstance {
+            kind,
+            enabled: true,
+        }),
+    }
+    save_state(&state)?;
+    Ok(daemon::status(&services::service_id(kind)))
+}
+
+/// Stop a service's launchd master and mark it disabled.
+pub fn stop_service(kind: ServiceKind) -> Result<()> {
+    daemon::unload(&services::service_id(kind))?;
+    let mut state = load_state()?;
+    if let Some(s) = state.services.iter_mut().find(|s| s.kind == kind) {
+        s.enabled = false;
+    }
+    save_state(&state)
+}
+
+/// Restart a service's launchd master (re-installs the spec first).
+pub fn restart_service(kind: ServiceKind) -> Result<Status> {
+    let brew = Brew::detect()?;
+    let spec = services::service_spec(&brew, kind)?;
+    daemon::install(&spec)?;
+    daemon::restart(&services::service_id(kind))?;
+    Ok(daemon::status(&services::service_id(kind)))
+}
+
+/// Stop a service and drop it from state. Leaves the brew formula installed.
+pub fn remove_service(kind: ServiceKind) -> Result<()> {
+    daemon::uninstall(&services::service_id(kind)).ok();
+    let mut state = load_state()?;
+    state.services.retain(|s| s.kind != kind);
+    save_state(&state)
 }
 
 /// Set the default PHP version for new vhosts.

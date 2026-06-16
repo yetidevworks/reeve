@@ -40,6 +40,13 @@ pub fn list(brew: &Brew, version: &str) -> Result<Vec<String>> {
     Ok(mods)
 }
 
+/// Is an extension currently loaded for a version (case-insensitive `php -m`)?
+pub fn is_loaded(brew: &Brew, version: &str, name: &str) -> Result<bool> {
+    Ok(list(brew, version)?
+        .iter()
+        .any(|m| m.eq_ignore_ascii_case(name)))
+}
+
 /// Install + enable an extension via PECL for a specific version.
 /// Auto-accepts PECL's interactive prompts with default answers.
 pub fn add(brew: &Brew, version: &str, name: &str) -> Result<()> {

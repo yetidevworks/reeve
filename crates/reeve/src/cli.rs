@@ -32,6 +32,14 @@ pub enum Commands {
     #[command(subcommand)]
     Vhost(VhostCommands),
 
+    /// Manage background services (databases, redis, memcached, mailpit).
+    #[command(subcommand)]
+    Service(ServiceCommands),
+
+    /// Park a directory so every subfolder auto-serves as <folder>.<tld>.
+    #[command(subcommand)]
+    Park(ParkCommands),
+
     /// Render generated configs and reconcile running services to state.
     Apply,
 
@@ -45,6 +53,21 @@ pub enum Commands {
     /// Manage local wildcard DNS for the dev TLD (default .test).
     #[command(subcommand)]
     Dns(DnsCommands),
+
+    /// View a managed service's log. Omit the target to list available logs.
+    Logs {
+        /// Target: server-<name>, php-<ver>, dnsmasq (or a bare server name).
+        target: Option<String>,
+        /// Number of trailing lines to show.
+        #[arg(long, short = 'n', default_value_t = 50)]
+        lines: usize,
+        /// Stream new lines as they arrive (like `tail -f`).
+        #[arg(long, short)]
+        follow: bool,
+    },
+
+    /// Diagnose the stack: Homebrew, servers, FPM, DNS, certs, ports.
+    Doctor,
 
     /// (hidden) Render one TUI frame to text — for testing without a terminal.
     #[command(hide = true)]
@@ -78,6 +101,16 @@ pub enum PhpCommands {
     /// Manage PHP extensions for a version.
     #[command(subcommand)]
     Ext(ExtCommands),
+    /// Show effective php.ini / OPcache / FPM settings for a version.
+    Settings { version: String },
+    /// Set a php.ini / OPcache / FPM setting (see `php settings <ver>` for keys).
+    Set {
+        version: String,
+        key: String,
+        value: String,
+    },
+    /// Toggle Xdebug for a version: off | debug | profile.
+    Xdebug { version: String, mode: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -127,17 +160,63 @@ pub enum VhostCommands {
         server_name: String,
         #[arg(long)]
         root: String,
-        #[arg(long)]
+        /// PHP version (not needed for a `--proxy` vhost).
+        #[arg(long, default_value = "")]
         php: String,
         #[arg(long)]
         server: String,
         #[arg(long)]
         ssl: bool,
+        /// Framework preset: generic|laravel|wordpress|symfony|grav|drupal.
+        #[arg(long, default_value = "generic")]
+        preset: String,
+        /// Make this a reverse proxy to an upstream URL (e.g. http://localhost:5173).
+        /// Mutually exclusive with PHP serving.
+        #[arg(long)]
+        proxy: Option<String>,
     },
     /// List vhosts.
     List,
     /// Remove a vhost.
     Remove { server_name: String },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ParkCommands {
+    /// Park a directory: subfolders auto-serve as <folder>.<tld>.
+    Add {
+        /// Directory to park (e.g. ~/Sites).
+        dir: String,
+        #[arg(long)]
+        server: String,
+        #[arg(long)]
+        php: String,
+        /// TLD for parked hosts (defaults to your first configured TLD).
+        #[arg(long)]
+        tld: Option<String>,
+        #[arg(long)]
+        ssl: bool,
+    },
+    /// Stop parking a directory.
+    Remove { dir: String },
+    /// List parked directories and the sites they currently expand to.
+    List,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServiceCommands {
+    /// Add a service (mysql|mariadb|postgres|redis|memcached|mailpit) to state.
+    Add { kind: String },
+    /// Install if needed, then start a service.
+    Start { kind: String },
+    /// Stop a service.
+    Stop { kind: String },
+    /// Restart a service.
+    Restart { kind: String },
+    /// List services and their status.
+    List,
+    /// Remove a service from state (leaves the brew formula installed).
+    Remove { kind: String },
 }
 
 #[derive(Subcommand, Debug)]

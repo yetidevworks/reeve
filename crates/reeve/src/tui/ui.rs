@@ -3,6 +3,7 @@
 
 use super::{App, Panel};
 use crate::daemon::Status;
+use crate::doctor::Health;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -16,18 +17,20 @@ const ACCENT: Color = Color::Cyan;
 pub fn render(f: &mut Frame, app: &App) {
     let servers_h = (app.state.servers.len() as u16 + 2).clamp(3, 14);
     let php_h = 3;
+    let services_h = (app.state.services.len() as u16 + 2).clamp(3, 8);
 
-    // Order top→bottom: Servers, Vhosts (expands), PHP (least-used, bottom),
-    // then a context-aware key bar and a status/message line.
+    // Order top→bottom: Servers, Vhosts (expands), PHP, Services (least-used,
+    // bottom), then a context-aware key bar and a status/message line.
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),         // title
-            Constraint::Length(servers_h), // servers
-            Constraint::Min(3),            // vhosts
-            Constraint::Length(php_h),     // php
-            Constraint::Length(1),         // key bar
-            Constraint::Length(1),         // status/message
+            Constraint::Length(1),          // title
+            Constraint::Length(servers_h),  // servers
+            Constraint::Min(3),             // vhosts
+            Constraint::Length(php_h),      // php
+            Constraint::Length(services_h), // services
+            Constraint::Length(1),          // key bar
+            Constraint::Length(1),          // status/message
         ])
         .split(f.area());
 
@@ -35,8 +38,9 @@ pub fn render(f: &mut Frame, app: &App) {
     render_servers(f, app, chunks[1]);
     render_vhosts(f, app, chunks[2]);
     render_php(f, app, chunks[3]);
-    render_keys(f, app, chunks[4]);
-    render_status(f, app, chunks[5]);
+    render_services(f, app, chunks[4]);
+    render_keys(f, app, chunks[5]);
+    render_status(f, app, chunks[6]);
 
     if app.wizard.is_some() {
         render_wizard(f, app);
@@ -55,6 +59,15 @@ pub fn render(f: &mut Frame, app: &App) {
     }
     if app.config_modal.is_some() {
         render_config_modal(f, app);
+    }
+    if app.php_settings.is_some() {
+        render_php_settings_modal(f, app);
+    }
+    if app.service_picker.is_some() {
+        render_service_picker(f, app);
+    }
+    if app.log_modal.is_some() {
+        render_log_modal(f, app);
     }
     if app.confirm_remove.is_some() {
         render_confirm(f, app, "vhost", app.confirm_remove.as_deref());
@@ -257,6 +270,53 @@ fn render_config_modal(f: &mut Frame, app: &App) {
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
+fn render_log_modal(f: &mut Frame, app: &App) {
+    let m = app.log_modal.as_ref().unwrap();
+    let outer = f.area();
+    // Near-fullscreen viewer with a small margin.
+    let area = centered_rect(
+        outer.width.saturating_sub(6),
+        outer.height.saturating_sub(4),
+        outer,
+    );
+    f.render_widget(Clear, area);
+
+    // Visible window: interior height minus borders and the footer hint line.
+    let win = area.height.saturating_sub(3) as usize;
+    let total = m.lines.len();
+    let scroll = m.scroll.min(total.saturating_sub(1));
+    let end = (scroll + win).min(total);
+
+    let mut lines: Vec<Line> = Vec::new();
+    if total == 0 {
+        lines.push(Line::from(Span::styled(
+            "  (no log output yet)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    for l in &m.lines[scroll..end] {
+        lines.push(Line::from(Span::raw(l.clone())));
+    }
+    lines.push(Line::from(Span::styled(
+        format!(
+            "  lines {}-{} of {} · ↑↓/PgUp/PgDn scroll · esc close",
+            scroll + 1,
+            end,
+            total
+        ),
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .title(Span::styled(
+            format!(" log: {} ", m.label),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
 fn render_settings_modal(f: &mut Frame, app: &App) {
     let m = app.settings_modal.as_ref().unwrap();
     let defs = crate::backends::settings_defs(m.backend);
@@ -300,6 +360,62 @@ fn render_settings_modal(f: &mut Frame, app: &App) {
         .border_style(Style::default().fg(ACCENT))
         .title(Span::styled(
             format!(" Settings: {} ({}) ", m.server_name, m.backend),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn render_php_settings_modal(f: &mut Frame, app: &App) {
+    let m = app.php_settings.as_ref().unwrap();
+    let defs = crate::php::php_settings_defs();
+    // Window the (long) field list so it always fits, centered on the active row.
+    let total = defs.len();
+    let win = 12usize;
+    let start = if total <= win {
+        0
+    } else {
+        m.field.saturating_sub(win / 2).min(total - win)
+    };
+    let end = (start + win).min(total);
+    let area = centered_rect(66, (end - start) as u16 + 6, f.area());
+    f.render_widget(Clear, area);
+
+    let mut lines = vec![Line::raw("")];
+    for (i, def) in defs.iter().enumerate().take(end).skip(start) {
+        let active = m.field == i;
+        let marker = if active { "› " } else { "  " };
+        let val = m.values.get(i).cloned().unwrap_or_default();
+        let cursor = if active { format!("{val}▏") } else { val };
+        let vstyle = if active {
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(vec![
+            Span::raw(format!("{marker}{:<24}", format!("{}:", def.label))),
+            Span::styled(format!("{cursor:<12}"), vstyle),
+            Span::styled(
+                format!(" ({})", def.help),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    }
+    if let Some(err) = &m.error {
+        lines.push(Line::from(Span::styled(
+            format!("  {err}"),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        "  tab/↑↓ field · type to edit · enter save+restart · esc cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .title(Span::styled(
+            format!(" PHP {} settings ", m.version),
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ));
     f.render_widget(Paragraph::new(lines).block(block), area);
@@ -390,6 +506,7 @@ fn render_keys(f: &mut Frame, app: &App, area: Rect) {
             ("s", "settings"),
             ("del", "remove"),
             ("a", "apply"),
+            ("L", "log"),
             ("c", "config"),
             ("q", "quit"),
         ],
@@ -399,6 +516,7 @@ fn render_keys(f: &mut Frame, app: &App, area: Rect) {
             ("r", "remove"),
             ("a", "apply"),
             ("v", "validate"),
+            ("L", "log"),
             ("c", "config"),
             ("q", "quit"),
         ],
@@ -406,8 +524,21 @@ fn render_keys(f: &mut Frame, app: &App, area: Rect) {
             ("enter", "restart"),
             ("n", "install"),
             ("e", "exts"),
+            ("s", "settings"),
+            ("x", "xdebug"),
             ("d", "default"),
             ("r", "remove"),
+            ("L", "log"),
+            ("c", "config"),
+            ("q", "quit"),
+        ],
+        Panel::Services => &[
+            ("enter", "start"),
+            ("x", "stop"),
+            ("r", "restart"),
+            ("n", "add"),
+            ("del", "remove"),
+            ("L", "log"),
             ("c", "config"),
             ("q", "quit"),
         ],
@@ -461,7 +592,7 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 
 fn render_wizard(f: &mut Frame, app: &App) {
     let w = app.wizard.as_ref().unwrap();
-    let area = centered_rect(66, 13, f.area());
+    let area = centered_rect(66, 15, f.area());
     f.render_widget(Clear, area);
 
     let php = app
@@ -533,8 +664,18 @@ fn render_wizard(f: &mut Frame, app: &App) {
                 "[ ] off".into()
             },
         ),
+        field_line(5, "Preset:", format!("‹ {} ›", w.preset)),
         Line::raw(""),
     ];
+    if w.proxy_target.is_some() {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  → reverse proxy to {}",
+                w.proxy_target.as_deref().unwrap()
+            ),
+            Style::default().fg(Color::Magenta),
+        )));
+    }
     if let Some(err) = &w.error {
         lines.push(Line::from(Span::styled(
             format!("  {err}"),
@@ -629,12 +770,20 @@ fn render_title(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 .add_modifier(Modifier::BOLD),
         )
     };
+    let (hsym, hcolor) = match app.health {
+        Health::Ok => ("●", Color::Green),
+        Health::Warn => ("●", Color::Yellow),
+        Health::Fail => ("●", Color::Red),
+    };
     let line = Line::from(vec![
         Span::styled(
             " reeve",
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ),
         dns,
+        Span::raw("   "),
+        Span::styled(hsym, Style::default().fg(hcolor)),
+        Span::styled(" health (L logs)", Style::default().fg(Color::DarkGray)),
     ]);
     f.render_widget(Paragraph::new(line), area);
 }
@@ -723,12 +872,88 @@ fn render_php(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         let label = format!("{}{} ", p.version, if is_default { "★" } else { "" });
         spans.push(Span::styled(label, row_style(sel, focused)));
         spans.push(status_span(status));
+        if !p.xdebug.is_off() {
+            spans.push(Span::styled(
+                format!(" 🐛{}", p.xdebug.as_str()),
+                Style::default().fg(Color::Magenta),
+            ));
+        }
         spans.push(Span::raw("   "));
     }
     f.render_widget(
         Paragraph::new(Line::from(spans)).block(panel_block("PHP", focused)),
         area,
     );
+}
+
+fn render_services(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let focused = app.focus == Panel::Services;
+    let mut lines: Vec<Line> = Vec::new();
+    if app.state.services.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no services — press 'n' to add a database, redis, or mailpit",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    for (i, s) in app.state.services.iter().enumerate() {
+        let sel = i == app.sel_service;
+        let status = app
+            .service_status
+            .get(i)
+            .copied()
+            .unwrap_or(Status::Stopped);
+        let head = format!(
+            " {} {:<11} :{:<6} ",
+            if sel && focused { "›" } else { " " },
+            s.kind,
+            crate::services::port(s.kind),
+        );
+        lines.push(
+            Line::from(vec![Span::raw(head), status_span(status)]).style(row_style(sel, focused)),
+        );
+    }
+    f.render_widget(
+        Paragraph::new(lines).block(panel_block("Services", focused)),
+        area,
+    );
+}
+
+fn render_service_picker(f: &mut Frame, app: &App) {
+    let m = app.service_picker.as_ref().unwrap();
+    let kinds = crate::state::ServiceKind::all();
+    let area = centered_rect(60, kinds.len() as u16 + 4, f.area());
+    f.render_widget(Clear, area);
+
+    let mut lines = vec![Line::raw("")];
+    for (i, kind) in kinds.iter().enumerate() {
+        let active = i == m.sel;
+        let marker = if active { "› " } else { "  " };
+        let style = if active {
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{marker}{:<11}", kind.as_str()), style),
+            Span::styled(
+                crate::services::blurb(*kind),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    }
+    lines.push(Line::from(Span::styled(
+        "  ↑↓ select · enter add+start · esc cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .title(Span::styled(
+            " Add service ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 /// Browser URL for a vhost, derived from its owning server's scheme + port.
@@ -756,7 +981,7 @@ pub fn vhost_url(app: &App, vhost: &crate::state::Vhost) -> String {
 fn render_vhosts(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let focused = app.focus == Panel::Vhosts;
     let mut lines: Vec<Line> = Vec::new();
-    if app.state.vhosts.is_empty() {
+    if app.state.vhosts.is_empty() && app.parked_vhosts.is_empty() {
         lines.push(Line::from(Span::styled(
             "  no vhosts — press 'n' to create one",
             Style::default().fg(Color::DarkGray),
@@ -782,6 +1007,17 @@ fn render_vhosts(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             ])
             .style(row_style(sel, focused)),
         );
+    }
+    // Parked sites are derived (read-only): shown dimmed below declared vhosts.
+    for v in &app.parked_vhosts {
+        let scheme = if v.ssl { "https" } else { "http" };
+        lines.push(Line::from(Span::styled(
+            format!(
+                "   {scheme}://{:<27} {:<8} {:<5} {}  (parked)",
+                v.server_name, v.server, v.php_version, v.docroot
+            ),
+            Style::default().fg(Color::DarkGray),
+        )));
     }
     f.render_widget(
         Paragraph::new(lines).block(panel_block("Vhosts", focused)),
