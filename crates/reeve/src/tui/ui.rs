@@ -518,7 +518,7 @@ fn render_keys(f: &mut Frame, app: &App, area: Rect) {
             ("n", "new"),
             ("e", "edit"),
             ("s", "settings"),
-            ("del", "remove"),
+            ("R/del", "remove"),
             ("a", "apply"),
             ("L", "log"),
             ("c", "config"),
@@ -527,24 +527,25 @@ fn render_keys(f: &mut Frame, app: &App, area: Rect) {
         Panel::Vhosts => &[
             ("n", "new"),
             ("e", "edit"),
-            ("r", "remove"),
+            ("r", "restart"),
+            ("R/del", "remove"),
             ("p", "park"),
+            ("1-4", "sort"),
             ("a", "apply"),
             ("v", "validate"),
             ("L", "log"),
-            ("c", "config"),
             ("q", "quit"),
         ],
         Panel::Php => &[
-            ("enter", "restart"),
+            ("enter/r", "restart"),
+            ("x", "stop"),
             ("n", "install"),
             ("e", "exts"),
             ("s", "settings"),
-            ("x", "xdebug"),
+            ("X", "xdebug"),
             ("d", "default"),
-            ("r", "remove"),
+            ("R/del", "remove"),
             ("L", "log"),
-            ("c", "config"),
             ("q", "quit"),
         ],
         Panel::Services => &[
@@ -552,7 +553,7 @@ fn render_keys(f: &mut Frame, app: &App, area: Rect) {
             ("x", "stop"),
             ("r", "restart"),
             ("n", "add"),
-            ("del", "remove"),
+            ("R/del", "remove"),
             ("L", "log"),
             ("c", "config"),
             ("q", "quit"),
@@ -1197,8 +1198,15 @@ fn render_vhosts(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             Style::default().fg(Color::DarkGray),
         )));
     }
+    let cols = ["host", "server", "php", "path"];
+    let arrow = if app.vhost_sort_asc { "▲" } else { "▼" };
+    let title = format!(
+        "Vhosts  [1-4 sort: {}{}]",
+        cols.get(app.vhost_sort_col).copied().unwrap_or("host"),
+        arrow
+    );
     f.render_widget(
-        Paragraph::new(lines).block(panel_block("Vhosts", focused)),
+        Paragraph::new(lines).block(panel_block(&title, focused)),
         area,
     );
 }

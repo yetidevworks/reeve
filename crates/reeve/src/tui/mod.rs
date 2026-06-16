@@ -41,6 +41,9 @@ pub struct App {
     pub sel_server: usize,
     pub sel_php: usize,
     pub sel_vhost: usize,
+    /// Vhost list sort: column 0=host 1=server 2=php 3=path, and ascending flag.
+    pub vhost_sort_col: usize,
+    pub vhost_sort_asc: bool,
     pub sel_service: usize,
     pub server_status: Vec<crate::ops::ServeState>,
     pub php_status: Vec<Status>,
@@ -295,6 +298,8 @@ impl App {
             sel_server: 0,
             sel_php: 0,
             sel_vhost: 0,
+            vhost_sort_col: 0,
+            vhost_sort_asc: true,
             sel_service: 0,
             server_status: Vec::new(),
             php_status: Vec::new(),
@@ -333,6 +338,7 @@ impl App {
     fn refresh(&mut self) {
         self.state = load_state().unwrap_or_default();
         self.state.sort_php();
+        self.sort_vhosts();
         self.config = load_config().unwrap_or_default();
         self.server_status = self
             .state
@@ -357,6 +363,29 @@ impl App {
         let brew = Brew::detect().ok();
         self.health = doctor::summary(&doctor::run(brew.as_ref(), &self.config, &self.state));
         self.clamp();
+    }
+
+    /// Order the (in-memory) vhost list by the chosen column + direction, so the
+    /// display is stable instead of insertion/edit order. Display-only — not
+    /// persisted.
+    fn sort_vhosts(&mut self) {
+        let col = self.vhost_sort_col;
+        self.state.vhosts.sort_by(|a, b| {
+            let o = match col {
+                1 => a.server.cmp(&b.server),
+                2 => crate::state::version_key(&a.php_version)
+                    .cmp(&crate::state::version_key(&b.php_version)),
+                3 => a.docroot.cmp(&b.docroot),
+                _ => a.server_name.cmp(&b.server_name),
+            }
+            // Stable tiebreak on host so equal keys keep a deterministic order.
+            .then_with(|| a.server_name.cmp(&b.server_name));
+            if self.vhost_sort_asc {
+                o
+            } else {
+                o.reverse()
+            }
+        });
     }
 
     fn clamp(&mut self) {
@@ -648,13 +677,23 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                 app.act("stop", r);
             }
         }
-        KeyCode::Char('x') if app.focus == Panel::Php => toggle_xdebug(app),
+        // 'x' = stop, consistently across panels.
+        KeyCode::Char('x') if app.focus == Panel::Php => {
+            if let Some(ver) = app.selected_php_version() {
+                let r = ops::stop_fpm(&ver).map(|_| format!("stopped FPM {ver}"));
+                app.act("stop", r);
+            }
+        }
         KeyCode::Char('x') if app.focus == Panel::Services => {
             if let Some(kind) = app.selected_service() {
                 let r = ops::stop_service(kind).map(|_| format!("stopped '{kind}'"));
                 app.act("stop", r);
             }
         }
+        // 'X' = Xdebug toggle (PHP) — moved off 'x' so 'x' can mean stop.
+        KeyCode::Char('X') if app.focus == Panel::Php => toggle_xdebug(app),
+        // 'r' = restart, consistently across panels. For a vhost (no process of
+        // its own) it re-applies the owning server(s).
         KeyCode::Char('r') => match app.focus {
             Panel::Servers => {
                 if let Some(name) = app.selected_server_name() {
@@ -663,17 +702,10 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                     app.act("restart", r);
                 }
             }
-            Panel::Php => {
-                // Context-aware: 'r' removes (unmanages) the selected PHP version.
-                if let Some(ver) = app.selected_php_version() {
-                    app.confirm_remove_php = Some(ver);
-                }
-            }
+            Panel::Php => restart_selected_fpm(app),
             Panel::Vhosts => {
-                // Context-aware: 'r' removes the selected vhost (with confirm).
-                if let Some(name) = app.selected_vhost_name() {
-                    app.confirm_remove = Some(name);
-                }
+                let r = apply_all().map(|n| format!("applied {n} server(s)"));
+                app.act("restart", r);
             }
             Panel::Services => {
                 if let Some(kind) = app.selected_service() {
@@ -701,6 +733,18 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         },
         KeyCode::Char('v') => validate_all(app),
         KeyCode::Char('p') if app.focus == Panel::Vhosts => open_park_modal(app),
+        // Sort the vhost list by column 1-4 (host/server/php/path); pressing the
+        // same column again toggles ascending/descending.
+        KeyCode::Char(c @ '1'..='4') if app.focus == Panel::Vhosts => {
+            let col = c as usize - '1' as usize;
+            if app.vhost_sort_col == col {
+                app.vhost_sort_asc = !app.vhost_sort_asc;
+            } else {
+                app.vhost_sort_col = col;
+                app.vhost_sort_asc = true;
+            }
+            app.sort_vhosts();
+        }
         KeyCode::Char('L') => open_log(app),
         KeyCode::Char('?') => open_doctor(app),
         KeyCode::Char('T') => {
@@ -713,8 +757,9 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             app.force_clear = true;
         }
         KeyCode::Char('c') => open_config_modal(app),
-        KeyCode::Delete | KeyCode::Backspace => match app.focus {
-            // Remove the focused item (always behind a confirm).
+        KeyCode::Delete | KeyCode::Backspace | KeyCode::Char('R') => match app.focus {
+            // Remove the focused item (always behind a confirm). 'R' is the
+            // letter alias so removal is the same key in every panel.
             Panel::Servers => {
                 if let Some(name) = app.selected_server_name() {
                     app.confirm_remove_server = Some(name);
@@ -1729,7 +1774,10 @@ fn remove_vhost(name: &str) -> Result<()> {
     if state.vhosts.len() == before {
         anyhow::bail!("vhost '{name}' not found");
     }
-    crate::state::save_state(&state)
+    crate::state::save_state(&state)?;
+    // Auto-apply so the removed vhost stops being served right away.
+    apply_all()?;
+    Ok(())
 }
 
 /// Test helper: force the wizard open (on the Doc root field) for a snapshot.
@@ -2034,9 +2082,13 @@ fn submit_wizard(app: &mut App) {
             } else {
                 format!("PHP {php}")
             };
-            app.message = format!(
-                "✓ {verb} vhost '{name}' on '{server}' ({how}) — press 'r' on the server to apply"
-            );
+            // Auto-apply: re-render + restart the running servers so the change
+            // takes effect immediately, instead of asking the user to do it.
+            let tail = match apply_all() {
+                Ok(n) => format!("— applied to {n} server(s)"),
+                Err(e) => format!("— saved, but apply failed: {e}"),
+            };
+            app.message = format!("✓ {verb} vhost '{name}' on '{server}' ({how}) {tail}");
             app.refresh();
         }
         Err(e) => set_err(app, e.to_string()),

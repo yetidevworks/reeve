@@ -231,6 +231,13 @@ pub fn restart_fpm(version: &str) -> Result<()> {
     php::ensure_fpm_running(&brew, &record)
 }
 
+/// Stop a version's FPM master (unload its launchd job; leaves it installed and
+/// in state, so `apply`/restart brings it back). Note any vhost on this version
+/// will 502 until it's restarted.
+pub fn stop_fpm(version: &str) -> Result<()> {
+    daemon::unload(&php::service_id(version))
+}
+
 /// Set one php.ini / OPcache / FPM setting for a version, persist, and restart
 /// the FPM master so it takes effect.
 pub fn set_php_setting(version: &str, key: &str, value: &str) -> Result<()> {

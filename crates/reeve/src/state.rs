@@ -421,8 +421,7 @@ impl State {
     /// Sort installed PHP versions ascending (7.3, 8.3, 8.4, …) so listings are
     /// stable regardless of install order.
     pub fn sort_php(&mut self) {
-        self.php_versions
-            .sort_by_key(|p| version_key(&p.version));
+        self.php_versions.sort_by_key(|p| version_key(&p.version));
     }
 
     pub fn add_server(&mut self, server: Server) -> Result<()> {
