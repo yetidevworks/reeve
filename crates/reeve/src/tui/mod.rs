@@ -332,6 +332,7 @@ impl App {
     /// Reload state from disk and recompute live launchd statuses.
     fn refresh(&mut self) {
         self.state = load_state().unwrap_or_default();
+        self.state.sort_php();
         self.config = load_config().unwrap_or_default();
         self.server_status = self
             .state

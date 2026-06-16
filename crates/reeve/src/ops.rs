@@ -180,6 +180,7 @@ pub fn install_php(version: &str) -> Result<()> {
     let mut state = load_state()?;
     state.php_versions.retain(|p| p.version != version);
     state.php_versions.push(record);
+    state.sort_php();
     save_state(&state)?;
     let mut cfg = load_config()?;
     if cfg.default_php.is_none() {

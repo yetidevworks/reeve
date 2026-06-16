@@ -396,6 +396,15 @@ pub struct State {
     pub parks: Vec<Park>,
 }
 
+/// Numeric sort key for a PHP version string like "8.4" → (8, 4), so versions
+/// order naturally instead of lexically ("8.10" after "8.9").
+pub fn version_key(v: &str) -> (u32, u32) {
+    let mut it = v.split('.');
+    let major = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let minor = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    (major, minor)
+}
+
 impl State {
     pub fn get_server(&self, name: &str) -> Option<&Server> {
         self.servers.iter().find(|s| s.name == name)
@@ -407,6 +416,13 @@ impl State {
 
     pub fn get_php(&self, version: &str) -> Option<&PhpVersion> {
         self.php_versions.iter().find(|p| p.version == version)
+    }
+
+    /// Sort installed PHP versions ascending (7.3, 8.3, 8.4, …) so listings are
+    /// stable regardless of install order.
+    pub fn sort_php(&mut self) {
+        self.php_versions
+            .sort_by_key(|p| version_key(&p.version));
     }
 
     pub fn add_server(&mut self, server: Server) -> Result<()> {

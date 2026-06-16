@@ -221,7 +221,8 @@ fn cmd_php(c: PhpCommands) -> Result<()> {
             Ok(())
         }
         PhpCommands::List => {
-            let state = load_state()?;
+            let mut state = load_state()?;
+            state.sort_php();
             if state.php_versions.is_empty() {
                 println!("No PHP versions installed. Run `reeve php install <version>`.");
             } else {
@@ -634,6 +635,13 @@ fn cmd_apply() -> Result<()> {
             vhosts.len(),
             status
         );
+    }
+    // Reconcile every PHP-FPM master too: rewrite its plist (so settings like
+    // the launchd QoS apply to all versions, not just whichever was last
+    // touched) and restart it.
+    for php in &state.php_versions {
+        php::ensure_fpm_running(&brew, php)?;
+        println!("✓ php {} FPM master reconciled", php.version);
     }
     Ok(())
 }
