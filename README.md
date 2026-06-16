@@ -40,14 +40,20 @@ the thing the old switcher-script approach can't do.
   upstream dev server as a **reverse proxy** (Vite, Node, …).
 - **Directory parking** (Valet-style) — park `~/Sites` and every subfolder
   auto-serves as `<folder>.test`, framework auto-detected, no per-project setup.
+  Odd folder names are slugified to valid hostnames automatically.
 - **Trusted local SSL** via a shared mkcert CA — `https://app.test` with no warnings.
 - **Wildcard DNS** for one or more TLDs (`.test`, `.localhost`, `.lan`, …) via a
   user-run dnsmasq (no root daemon).
-- **Default site** — optionally serve a catch-all from your sites root, so
-  `http(s)://localhost` works without a per-project vhost.
+- **Default site** — optionally serve a catch-all from your sites root (with an
+  optional framework preset), so `http(s)://localhost` works without a vhost.
 - **`logs` + `doctor`** — tail any service's log, and a one-shot health check of
   the whole stack (Homebrew, servers, FPM, services, DNS, certs, ports).
-- **TUI dashboard** with live status, plus a scriptable CLI — same engine underneath.
+- **Honest, port-aware status** — `running` only when the port is actually bound;
+  otherwise `loaded, not bound`, `:<port> held by <process>`, or `crashed`.
+  `start`/`restart` preflight the ports and name any foreign process holding them.
+- **TUI dashboard** with live status — mouse-clickable, scrollable panels (a
+  dedicated **Parked** panel for parked sites) — plus a scriptable CLI on the
+  same engine.
 - **No sudo** for day-to-day use; servers bind 80/443 as your user via launchd.
 
 ## Requirements
@@ -167,7 +173,7 @@ keys for the focused panel).
 | `Enter` | Start server or service / restart FPM master |
 | `x` · `r` | Stop · restart (Servers, Services) |
 | `s` | Per-backend settings (Servers) / per-version PHP settings (PHP) |
-| `x` | Cycle Xdebug off→debug→profile (PHP panel) |
+| `X` | Cycle Xdebug off→debug→profile (PHP panel) |
 | `d` | Set default PHP version (PHP panel) |
 | `p` | Park a directory / manage parks (Vhosts or Parked panel) |
 | `L` | View the focused item's log |
@@ -192,8 +198,8 @@ The new-vhost wizard (`n` on Vhosts) covers framework **presets** and a
 | `php ext add\|remove\|list <ver> [name]` | Manage extensions per version (pecl) |
 | `php settings <ver>` / `php set <ver> <key> <value>` | Show / tune php.ini, OPcache, FPM pool |
 | `php xdebug <ver> off\|debug\|profile` | Toggle Xdebug for a version |
-| `server add <backend> [--http N --https N]` | Add caddy\|apache\|nginx |
-| `server start\|stop\|restart\|list <name>` | Manage a server (independent) |
+| `server add <backend> [--http N --https N] [--default-site] [--preset <fw>]` | Add caddy\|apache\|nginx (optionally a catch-all default site) |
+| `server start\|stop\|restart\|list\|remove <name>` | Manage a server (independent) |
 | `vhost add <host> --root <dir> --php <ver> --server <name> [--ssl] [--preset <fw>] [--proxy <url>]` | Add a vhost |
 | `vhost list\|remove <host>` | Manage vhosts |
 | `service add\|start\|stop\|restart\|remove\|list <kind>` | Manage databases / redis / memcached / mailpit |
