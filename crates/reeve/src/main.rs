@@ -547,40 +547,15 @@ fn cmd_park(c: ParkCommands) -> Result<()> {
         } => {
             let cfg = load_config()?;
             let root = expand_tilde(&dir);
-            if !std::path::Path::new(&root).is_dir() {
-                anyhow::bail!("'{root}' is not a directory");
-            }
-            let mut state = load_state()?;
-            if state.get_server(&server).is_none() {
-                anyhow::bail!("Server '{server}' does not exist");
-            }
-            if state.get_php(&php).is_none() {
-                anyhow::bail!("PHP {php} is not installed. Run `reeve php install {php}`.");
-            }
             let tld = tld.unwrap_or_else(|| cfg.local_tlds[0].clone());
-            state.parks.retain(|p| p.root != root);
-            state.parks.push(state::Park {
-                root: root.clone(),
-                server,
-                php_version: php,
-                tld: tld.clone(),
-                ssl,
-            });
-            save_state(&state)?;
-            let n = park::expand(state.parks.last().unwrap()).len();
+            let n = ops::add_park(&root, &server, &php, &tld, ssl)?;
             println!("✓ Parked {root} → *.{tld} ({n} site(s) found)");
             println!("  Run `reeve apply` to render and reload.");
             Ok(())
         }
         ParkCommands::Remove { dir } => {
             let root = expand_tilde(&dir);
-            let mut state = load_state()?;
-            let before = state.parks.len();
-            state.parks.retain(|p| p.root != root);
-            if state.parks.len() == before {
-                anyhow::bail!("'{root}' is not parked");
-            }
-            save_state(&state)?;
+            ops::remove_park(&root)?;
             println!("✓ Unparked {root} — run `reeve apply` to drop its sites");
             Ok(())
         }

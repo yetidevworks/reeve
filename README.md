@@ -165,12 +165,18 @@ keys for the focused panel).
 | `s` | Per-backend settings (Servers) / per-version PHP settings (PHP) |
 | `x` | Cycle Xdebug off→debug→profile (PHP panel) |
 | `d` | Set default PHP version (PHP panel) |
+| `p` | Park a directory / manage parks (Vhosts panel) |
 | `L` | View the focused item's log |
+| `?` | Full `doctor` health report |
+| `T` | Install the mkcert CA into your trust store (`ssl trust`) |
 | `Del` / `Backspace` | Remove the focused item (with confirm) |
 | `a` · `v` | Apply · validate all configs |
 | `c` | Preferences (TLDs, sites root, default backend) |
 | `D` | Set up wildcard DNS (admin prompt) |
 | `q` / `Esc` | Quit |
+
+The new-vhost wizard (`n` on Vhosts) covers framework **presets** and a
+**reverse-proxy** target, so everything the CLI does is reachable from the TUI.
 
 ## Commands
 

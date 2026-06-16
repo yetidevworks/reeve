@@ -240,6 +240,44 @@ pub fn remove_service(kind: ServiceKind) -> Result<()> {
     save_state(&state)
 }
 
+/// Park a directory (validates server + PHP + dir), replacing any existing park
+/// for the same root. Returns the number of sites it currently expands to.
+pub fn add_park(root: &str, server: &str, php: &str, tld: &str, ssl: bool) -> Result<usize> {
+    if !std::path::Path::new(root).is_dir() {
+        bail!("'{root}' is not a directory");
+    }
+    let mut state = load_state()?;
+    if state.get_server(server).is_none() {
+        bail!("Server '{server}' does not exist");
+    }
+    if state.get_php(php).is_none() {
+        bail!("PHP {php} is not installed. Run `reeve php install {php}`.");
+    }
+    let park = crate::state::Park {
+        root: root.to_string(),
+        server: server.to_string(),
+        php_version: php.to_string(),
+        tld: tld.to_string(),
+        ssl,
+    };
+    let n = crate::park::expand(&park).len();
+    state.parks.retain(|p| p.root != root);
+    state.parks.push(park);
+    save_state(&state)?;
+    Ok(n)
+}
+
+/// Stop parking a directory. Errors if it wasn't parked.
+pub fn remove_park(root: &str) -> Result<()> {
+    let mut state = load_state()?;
+    let before = state.parks.len();
+    state.parks.retain(|p| p.root != root);
+    if state.parks.len() == before {
+        bail!("'{root}' is not parked");
+    }
+    save_state(&state)
+}
+
 /// Set the default PHP version for new vhosts.
 pub fn set_default_php(version: &str) -> Result<()> {
     let mut cfg = load_config()?;

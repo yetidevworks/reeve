@@ -59,6 +59,9 @@ Initial release.
   auto-detection (Laravel/Symfony/Drupal/WordPress/Grav); new folders appear on
   the next `apply`. `park list|remove`, and parked sites show (read-only) in the
   TUI Vhosts panel.
+- **Full TUI/CLI parity**: the new-vhost wizard gained a reverse-proxy field, a
+  park manager (`p`) handles add/remove, `?` opens the full `doctor` report, and
+  `T` runs `ssl trust` — so everything the CLI can do is reachable in the TUI.
 
 ### Known limitations
 - **OpenLiteSpeed** is wired in but unusable on macOS: the only community

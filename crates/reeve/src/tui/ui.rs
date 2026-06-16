@@ -66,8 +66,14 @@ pub fn render(f: &mut Frame, app: &App) {
     if app.service_picker.is_some() {
         render_service_picker(f, app);
     }
+    if app.park_modal.is_some() {
+        render_park_modal(f, app);
+    }
     if app.log_modal.is_some() {
         render_log_modal(f, app);
+    }
+    if app.doctor_modal.is_some() {
+        render_doctor_modal(f, app);
     }
     if app.confirm_remove.is_some() {
         render_confirm(f, app, "vhost", app.confirm_remove.as_deref());
@@ -514,6 +520,7 @@ fn render_keys(f: &mut Frame, app: &App, area: Rect) {
             ("n", "new"),
             ("e", "edit"),
             ("r", "remove"),
+            ("p", "park"),
             ("a", "apply"),
             ("v", "validate"),
             ("L", "log"),
@@ -592,7 +599,7 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 
 fn render_wizard(f: &mut Frame, app: &App) {
     let w = app.wizard.as_ref().unwrap();
-    let area = centered_rect(66, 15, f.area());
+    let area = centered_rect(66, 17, f.area());
     f.render_widget(Clear, area);
 
     let php = app
@@ -665,14 +672,20 @@ fn render_wizard(f: &mut Frame, app: &App) {
             },
         ),
         field_line(5, "Preset:", format!("‹ {} ›", w.preset)),
+        field_line(
+            6,
+            "Proxy:",
+            if w.proxy.is_empty() && w.field != 6 {
+                "(none — set to reverse-proxy instead of PHP)".to_string()
+            } else {
+                cursor(&w.proxy, w.field == 6)
+            },
+        ),
         Line::raw(""),
     ];
-    if w.proxy_target.is_some() {
+    if !w.proxy.is_empty() {
         lines.push(Line::from(Span::styled(
-            format!(
-                "  → reverse proxy to {}",
-                w.proxy_target.as_deref().unwrap()
-            ),
+            "  → reverse-proxy vhost (PHP / preset / docroot ignored)",
             Style::default().fg(Color::Magenta),
         )));
     }
@@ -783,7 +796,10 @@ fn render_title(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         dns,
         Span::raw("   "),
         Span::styled(hsym, Style::default().fg(hcolor)),
-        Span::styled(" health (L logs)", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            " health  ? doctor · L logs · T trust",
+            Style::default().fg(Color::DarkGray),
+        ),
     ]);
     f.render_widget(Paragraph::new(line), area);
 }
@@ -916,6 +932,142 @@ fn render_services(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         Paragraph::new(lines).block(panel_block("Services", focused)),
         area,
     );
+}
+
+fn render_park_modal(f: &mut Frame, app: &App) {
+    let m = app.park_modal.as_ref().unwrap();
+    let parks = &app.state.parks;
+    let area = centered_rect(74, parks.len().max(1) as u16 + 12, f.area());
+    f.render_widget(Clear, area);
+
+    let server = app
+        .state
+        .servers
+        .get(m.server_idx)
+        .map(|s| s.name.as_str())
+        .unwrap_or("-");
+    let php = app
+        .state
+        .php_versions
+        .get(m.php_idx)
+        .map(|p| p.version.as_str())
+        .unwrap_or("-");
+
+    let cursor = |s: &str, active: bool| {
+        if active {
+            format!("{s}▏")
+        } else {
+            s.to_string()
+        }
+    };
+    let field_line = |idx: usize, label: &str, value: String| -> Line {
+        let active = m.field == idx;
+        let marker = if active { "› " } else { "  " };
+        let vstyle = if active {
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        Line::from(vec![
+            Span::raw(format!("{marker}{label:<9}")),
+            Span::styled(value, vstyle),
+        ])
+    };
+
+    let mut lines = vec![Line::from(Span::styled(
+        "  Parked directories (↑↓ select, del to remove):",
+        Style::default().add_modifier(Modifier::BOLD),
+    ))];
+    if parks.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "    (none yet)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    for (i, p) in parks.iter().enumerate() {
+        let active = m.field == 0 && i == m.sel_park;
+        let marker = if active { "  › " } else { "    " };
+        let style = if active {
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        lines.push(Line::from(Span::styled(
+            format!(
+                "{marker}{} → *.{} ({}, {})",
+                p.root, p.tld, p.server, p.php_version
+            ),
+            style,
+        )));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "  Add a park:",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    lines.push(field_line(1, "Dir:", cursor(&m.dir, m.field == 1)));
+    lines.push(field_line(2, "Server:", format!("‹ {server} ›")));
+    lines.push(field_line(3, "PHP:", format!("‹ {php} ›")));
+    lines.push(field_line(
+        4,
+        "SSL:",
+        if m.ssl {
+            "[x] on".into()
+        } else {
+            "[ ] off".into()
+        },
+    ));
+    if let Some(err) = &m.error {
+        lines.push(Line::from(Span::styled(
+            format!("  {err}"),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        "  tab field · ←→/space change · enter add · esc close",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .title(Span::styled(
+            " Directory parking ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn render_doctor_modal(f: &mut Frame, app: &App) {
+    let m = app.doctor_modal.as_ref().unwrap();
+    let area = centered_rect(72, m.lines.len() as u16 + 4, f.area());
+    f.render_widget(Clear, area);
+
+    let mut lines = vec![Line::raw("")];
+    for (health, text) in &m.lines {
+        let color = match health {
+            Health::Ok => Color::Green,
+            Health::Warn => Color::Yellow,
+            Health::Fail => Color::Red,
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {} ", health.symbol()), Style::default().fg(color)),
+            Span::raw(text.clone()),
+        ]));
+    }
+    lines.push(Line::from(Span::styled(
+        "  any key to close",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .title(Span::styled(
+            " doctor ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 fn render_service_picker(f: &mut Frame, app: &App) {

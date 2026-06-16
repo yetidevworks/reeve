@@ -12,6 +12,7 @@ use crate::doctor::{self, Health};
 use crate::logs;
 use crate::ops;
 use crate::php;
+use crate::ssl;
 use crate::state::{load_state, Backend, Framework, State, XdebugMode};
 use anyhow::Result;
 use crossterm::{
@@ -78,6 +79,8 @@ pub struct App {
     pub pending_xdebug: Option<(String, XdebugMode)>,
     /// Service-picker modal (choose a kind to add), when open.
     pub service_picker: Option<ServicePicker>,
+    /// Park manager modal, when open.
+    pub park_modal: Option<ParkModal>,
     /// A queued service start that may need a (slow) brew install — run_loop
     /// suspends the TUI to show output.
     pub pending_service: Option<crate::state::ServiceKind>,
@@ -85,6 +88,8 @@ pub struct App {
     pub pending_server: Option<String>,
     /// Log-viewer modal (read-only tail of a service log), when open.
     pub log_modal: Option<LogModal>,
+    /// Full doctor report modal, when open.
+    pub doctor_modal: Option<DoctorModal>,
     /// Worst-of health across all diagnostics, shown in the title bar.
     pub health: Health,
     /// Set after an action that may have disturbed the terminal (e.g. the admin
@@ -99,6 +104,11 @@ pub struct LogModal {
     pub lines: Vec<String>,
     /// First visible line index (scroll offset).
     pub scroll: usize,
+}
+
+/// Full `doctor` report as a modal (each line health-colored).
+pub struct DoctorModal {
+    pub lines: Vec<(Health, String)>,
 }
 
 /// Trailing lines to load into the log viewer.
@@ -164,6 +174,22 @@ pub struct ServicePicker {
     pub sel: usize,
 }
 
+/// Editable fields in the park manager (parks list, dir, server, php, ssl).
+pub const PARK_FIELDS: usize = 5;
+
+/// Park manager modal: lists existing parks (removable) and an add form.
+pub struct ParkModal {
+    pub dir: String,
+    pub server_idx: usize,
+    pub php_idx: usize,
+    pub ssl: bool,
+    /// Highlighted existing park (field 0), for removal.
+    pub sel_park: usize,
+    /// 0 = parks list, 1 = dir, 2 = server, 3 = php, 4 = ssl.
+    pub field: usize,
+    pub error: Option<String>,
+}
+
 /// Per-version PHP settings modal state. `values` parallels
 /// `php::php_settings_defs()`.
 pub struct PhpSettingsModal {
@@ -199,8 +225,11 @@ pub struct ServerWizard {
 }
 
 /// Number of editable fields in the new-vhost wizard
-/// (host, docroot, php, server, ssl, preset).
-pub const WIZARD_FIELDS: usize = 6;
+/// (host, docroot, php, server, ssl, preset, proxy).
+pub const WIZARD_FIELDS: usize = 7;
+
+/// The Proxy-target field index in the wizard.
+const FIELD_PROXY: usize = 6;
 
 /// Modal form state for creating a vhost.
 pub struct VhostWizard {
@@ -219,8 +248,8 @@ pub struct VhostWizard {
     pub path_sel: Option<usize>,
     /// Framework preset (field 5).
     pub preset: Framework,
-    /// Proxy target carried through edits (set only via the CLI `--proxy`).
-    pub proxy_target: Option<String>,
+    /// Reverse-proxy upstream URL (field 6). Empty = a normal PHP/file vhost.
+    pub proxy: String,
 }
 
 impl VhostWizard {
@@ -285,9 +314,11 @@ impl App {
             php_settings: None,
             pending_xdebug: None,
             service_picker: None,
+            park_modal: None,
             pending_service: None,
             pending_server: None,
             log_modal: None,
+            doctor_modal: None,
             health: Health::Ok,
             force_clear: false,
             should_quit: false,
@@ -436,6 +467,8 @@ pub fn snapshot(width: u16, height: u16, modal: &str) -> Result<String> {
         "ext" => open_ext_modal(&mut app),
         "phpsettings" => open_php_settings(&mut app),
         "service" => app.service_picker = Some(ServicePicker { sel: 0 }),
+        "park" => open_park_modal(&mut app),
+        "doctor" => open_doctor(&mut app),
         "config" => open_config_modal(&mut app),
         "log" => {
             app.log_modal = Some(LogModal {
@@ -575,8 +608,17 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         handle_service_picker_key(app, code);
         return;
     }
+    if app.park_modal.is_some() {
+        handle_park_key(app, code);
+        return;
+    }
     if app.log_modal.is_some() {
         handle_log_key(app, code);
+        return;
+    }
+    if app.doctor_modal.is_some() {
+        // Any key dismisses the read-only doctor report.
+        app.doctor_modal = None;
         return;
     }
     match code {
@@ -655,7 +697,18 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             Panel::Services => app.service_picker = Some(ServicePicker { sel: 0 }),
         },
         KeyCode::Char('v') => validate_all(app),
+        KeyCode::Char('p') if app.focus == Panel::Vhosts => open_park_modal(app),
         KeyCode::Char('L') => open_log(app),
+        KeyCode::Char('?') => open_doctor(app),
+        KeyCode::Char('T') => {
+            app.message = "installing mkcert CA into the trust store…".into();
+            let r = Brew::detect()
+                .and_then(|brew| ssl::ensure_ca(&brew))
+                .map(|_| "mkcert CA installed — local HTTPS is now trusted".to_string());
+            app.act("ssl trust", r);
+            // mkcert may pop an admin dialog — repaint to clear artifacts.
+            app.force_clear = true;
+        }
         KeyCode::Char('c') => open_config_modal(app),
         KeyCode::Delete | KeyCode::Backspace => match app.focus {
             // Remove the focused item (always behind a confirm).
@@ -748,6 +801,17 @@ fn open_log(app: &mut App) {
     }
 }
 
+/// Open the full doctor report as a modal (the title only shows a dot).
+fn open_doctor(app: &mut App) {
+    let brew = Brew::detect().ok();
+    let checks = doctor::run(brew.as_ref(), &app.config, &app.state);
+    let lines = checks
+        .into_iter()
+        .map(|c| (c.health, format!("{:<16} {}", c.name, c.detail)))
+        .collect();
+    app.doctor_modal = Some(DoctorModal { lines });
+}
+
 /// Scroll / close the log viewer.
 fn handle_log_key(app: &mut App, code: KeyCode) {
     let Some(m) = app.log_modal.as_mut() else {
@@ -807,6 +871,126 @@ fn open_new_server(app: &mut App) {
         editing: None,
         installed: backends_installed(),
     });
+}
+
+/// Open the park manager (list existing parks + add form). Needs a server and
+/// a PHP version to point parked sites at.
+fn open_park_modal(app: &mut App) {
+    if app.state.servers.is_empty() {
+        app.message = "Add a server first: `reeve server add caddy`".into();
+        return;
+    }
+    if app.state.php_versions.is_empty() {
+        app.message = "Install a PHP version first: `reeve php install 8.3`".into();
+        return;
+    }
+    app.park_modal = Some(ParkModal {
+        dir: format!("{}/", app.config.sites_root.trim_end_matches('/')),
+        server_idx: app.sel_server.min(app.state.servers.len() - 1),
+        php_idx: app.sel_php.min(app.state.php_versions.len() - 1),
+        ssl: false,
+        sel_park: 0,
+        field: 1,
+        error: None,
+    });
+}
+
+fn handle_park_key(app: &mut App, code: KeyCode) {
+    let park_count = app.state.parks.len();
+    let php_len = app.state.php_versions.len();
+    let srv_len = app.state.servers.len();
+    let m = app.park_modal.as_mut().unwrap();
+    let cyc = |i: usize, len: usize, fwd: bool| {
+        if len == 0 {
+            0
+        } else if fwd {
+            (i + 1) % len
+        } else {
+            (i + len - 1) % len
+        }
+    };
+    match code {
+        KeyCode::Esc => app.park_modal = None,
+        KeyCode::Enter => submit_park(app),
+        KeyCode::Tab => m.field = (m.field + 1) % PARK_FIELDS,
+        KeyCode::BackTab => m.field = (m.field + PARK_FIELDS - 1) % PARK_FIELDS,
+        // Field 0 is the existing-parks list: ↑↓ select, del removes.
+        KeyCode::Up if m.field == 0 => m.sel_park = m.sel_park.saturating_sub(1),
+        KeyCode::Down if m.field == 0 => {
+            m.sel_park = (m.sel_park + 1).min(park_count.saturating_sub(1))
+        }
+        KeyCode::Delete | KeyCode::Backspace if m.field == 0 => {
+            if let Some(p) = app.state.parks.get(m.sel_park) {
+                let root = p.root.clone();
+                let r = ops::remove_park(&root).map(|_| format!("unparked {root}"));
+                app.act("unpark", r);
+            }
+        }
+        // Add-form fields.
+        KeyCode::Up => m.field = (m.field + PARK_FIELDS - 1) % PARK_FIELDS,
+        KeyCode::Down => m.field = (m.field + 1) % PARK_FIELDS,
+        KeyCode::Backspace if m.field == 1 => {
+            m.dir.pop();
+        }
+        KeyCode::Char(c) if m.field == 1 => m.dir.push(c),
+        KeyCode::Left if m.field == 2 => m.server_idx = cyc(m.server_idx, srv_len, false),
+        KeyCode::Right | KeyCode::Char(' ') if m.field == 2 => {
+            m.server_idx = cyc(m.server_idx, srv_len, true)
+        }
+        KeyCode::Left if m.field == 3 => m.php_idx = cyc(m.php_idx, php_len, false),
+        KeyCode::Right | KeyCode::Char(' ') if m.field == 3 => {
+            m.php_idx = cyc(m.php_idx, php_len, true)
+        }
+        KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right if m.field == 4 => m.ssl = !m.ssl,
+        _ => {}
+    }
+}
+
+fn submit_park(app: &mut App) {
+    let m = app.park_modal.as_ref().unwrap();
+    let dir = expand_tilde_tui(m.dir.trim());
+    let server = app.state.servers.get(m.server_idx).map(|s| s.name.clone());
+    let php = app
+        .state
+        .php_versions
+        .get(m.php_idx)
+        .map(|p| p.version.clone());
+    let ssl = m.ssl;
+    let tld = app
+        .config
+        .local_tlds
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "test".into());
+
+    let (Some(server), Some(php)) = (server, php) else {
+        if let Some(m) = app.park_modal.as_mut() {
+            m.error = Some("Pick a server and a PHP version".into());
+        }
+        return;
+    };
+    match ops::add_park(&dir, &server, &php, &tld, ssl) {
+        Ok(n) => {
+            app.park_modal = None;
+            app.message = format!("✓ parked {dir} → *.{tld} ({n} site(s)) — press 'a' to apply");
+            app.refresh();
+        }
+        Err(e) => {
+            if let Some(m) = app.park_modal.as_mut() {
+                m.error = Some(e.to_string());
+            }
+        }
+    }
+}
+
+/// Expand a leading `~` to the home directory (TUI-side copy).
+fn expand_tilde_tui(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest).display().to_string();
+        }
+    }
+    path.to_string()
 }
 
 /// Derive a unique instance name from the backend (caddy, caddy2, caddy3, …).
@@ -1562,7 +1746,7 @@ fn open_wizard(app: &mut App) {
         dropdown_open: true,
         path_sel: None,
         preset: Framework::Generic,
-        proxy_target: None,
+        proxy: String::new(),
     });
 }
 
@@ -1595,7 +1779,7 @@ fn open_edit_wizard(app: &mut App) {
         dropdown_open: true,
         path_sel: None,
         preset: v.preset,
-        proxy_target: v.proxy_target,
+        proxy: v.proxy_target.unwrap_or_default(),
     });
 }
 
@@ -1659,6 +1843,9 @@ fn handle_wizard_key(app: &mut App, code: KeyCode) {
                 w.docroot.pop();
                 w.dropdown_open = true;
             }
+            FIELD_PROXY => {
+                w.proxy.pop();
+            }
             _ => {}
         },
         KeyCode::Char(' ') => match w.field {
@@ -1673,6 +1860,7 @@ fn handle_wizard_key(app: &mut App, code: KeyCode) {
                 w.docroot.push(c);
                 w.dropdown_open = true;
             }
+            FIELD_PROXY => w.proxy.push(c),
             _ => {}
         },
         _ => {}
@@ -1753,7 +1941,8 @@ fn submit_wizard(app: &mut App) {
     let server = app.state.servers.get(w.server_idx).map(|s| s.name.clone());
     let ssl = w.ssl;
     let preset = w.preset;
-    let proxy_target = w.proxy_target.clone();
+    let proxy = w.proxy.trim().to_string();
+    let is_proxy = !proxy.is_empty();
     let raw_root = w.docroot.trim();
     let docroot = if raw_root.is_empty() {
         format!("{}/{}", app.config.sites_root.trim_end_matches('/'), name)
@@ -1775,10 +1964,23 @@ fn submit_wizard(app: &mut App) {
         set_err(app, "Hostname is required".into());
         return;
     }
-    let (Some(php), Some(server)) = (php, server) else {
-        set_err(app, "Pick a PHP version and a server".into());
+    let Some(server) = server else {
+        set_err(app, "Pick a server".into());
         return;
     };
+    // A proxy vhost doesn't serve PHP; only normal vhosts need a version.
+    let php = if is_proxy {
+        String::new()
+    } else {
+        match php {
+            Some(p) => p,
+            None => {
+                set_err(app, "Pick a PHP version".into());
+                return;
+            }
+        }
+    };
+    let proxy_target = if is_proxy { Some(proxy.clone()) } else { None };
 
     let editing = app.wizard.as_ref().and_then(|w| w.editing.clone());
 
@@ -1808,7 +2010,14 @@ fn submit_wizard(app: &mut App) {
             } else {
                 "created"
             };
-            app.message = format!("✓ {verb} vhost '{name}' on '{server}' (PHP {php}) — press 'r' on the server to apply");
+            let how = if is_proxy {
+                format!("→ proxy {proxy}")
+            } else {
+                format!("PHP {php}")
+            };
+            app.message = format!(
+                "✓ {verb} vhost '{name}' on '{server}' ({how}) — press 'r' on the server to apply"
+            );
             app.refresh();
         }
         Err(e) => set_err(app, e.to_string()),
