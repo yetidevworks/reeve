@@ -135,7 +135,7 @@ reeve
 
 ```
  reeve   [.test ✓ resolving]   ● health (L logs)
-┌ Servers ─────────────────────────────────────────────┐
+┌ Servers ──────────────────────────────────────────────┐
 │ › caddy    caddy   :80/:443     ● running             │
 │   apache   apache  :8080/:8543  ● running             │
 │   nginx    nginx   :9090/:9443  ○ stopped             │
