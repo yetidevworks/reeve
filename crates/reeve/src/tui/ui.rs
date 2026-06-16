@@ -429,7 +429,7 @@ fn render_php_settings_modal(f: &mut Frame, app: &App) {
 
 fn render_server_wizard(f: &mut Frame, app: &App) {
     let w = app.server_wizard.as_ref().unwrap();
-    let area = centered_rect(62, 12, f.area());
+    let area = centered_rect(62, 13, f.area());
     f.render_widget(Clear, area);
 
     let backend = super::BACKENDS[w.backend_idx].as_str();
@@ -472,6 +472,14 @@ fn render_server_wizard(f: &mut Frame, app: &App) {
             } else {
                 "[ ] off".into()
             },
+        ),
+        field_line(
+            4,
+            "Site preset:",
+            format!(
+                "‹ {} ›",
+                crate::state::Framework::all()[w.preset_idx].as_str()
+            ),
         ),
         Line::raw(""),
     ];
@@ -836,9 +844,7 @@ fn serve_state_span(state: &crate::ops::ServeState) -> Span<'static> {
         S::Serving => ("● running".to_string(), Color::Green),
         S::Stopped => ("○ stopped".to_string(), Color::DarkGray),
         S::LoadedNotBound => ("⚠ loaded, not bound".to_string(), Color::Yellow),
-        S::PortConflict { port, holder, .. } => {
-            (format!("✗ :{port} held by {holder}"), Color::Red)
-        }
+        S::PortConflict { port, holder, .. } => (format!("✗ :{port} held by {holder}"), Color::Red),
         S::Crashed => ("✗ crashed".to_string(), Color::Red),
     };
     Span::styled(text, Style::default().fg(color))

@@ -124,6 +124,10 @@ impl Nginx {
             })?;
             out.push_str(&format!("        root {};\n", q(&v.effective_docroot())));
             out.push_str("        index index.php index.html;\n");
+            // Preset security locations FIRST (nginx takes the first matching
+            // regex location), so e.g. /user/accounts/* is denied before the
+            // generic PHP handler can run it.
+            out.push_str(crate::preset::nginx_security(v.preset));
             out.push_str(&format!(
                 "        location / {{ try_files {}; }}\n",
                 crate::preset::nginx_try_files(v.preset)
@@ -150,9 +154,11 @@ impl Nginx {
                 out.push_str("        server_name _;\n");
                 out.push_str(&format!("        root {};\n", root));
                 out.push_str("        index index.php index.html;\n");
-                out.push_str(
-                    "        location / { try_files $uri $uri/ /index.php?$query_string; }\n",
-                );
+                out.push_str(crate::preset::nginx_security(server.default_preset));
+                out.push_str(&format!(
+                    "        location / {{ try_files {}; }}\n",
+                    crate::preset::nginx_try_files(server.default_preset)
+                ));
                 if let Some(sock) = &php_sock {
                     out.push_str("        location ~ \\.php$ {\n");
                     out.push_str(&format!(

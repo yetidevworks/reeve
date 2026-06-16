@@ -283,6 +283,7 @@ mod tests {
             https_port: https,
             enabled,
             default_site: false,
+            default_preset: Default::default(),
             settings: Default::default(),
         }
     }

@@ -30,7 +30,16 @@ full TUI/CLI parity, and performance/correctness fixes.
   `server add` / first start (visible brew output) instead of stalling silently.
 - **Framework presets**: `vhost add --preset laravel|wordpress|symfony|grav|drupal`
   sets the conventional public docroot (Laravel/Symfony `public/`, Drupal `web/`)
-  and per-backend rewrites. Selectable in the TUI new-vhost wizard.
+  and per-backend rewrites. Selectable in the TUI new-vhost wizard. A server's
+  catch-all **default site** can take a preset too (`server add --preset …`, or
+  the TUI new-server wizard), so the non-vhost webroot gets front-controller
+  routing instead of plain file serving.
+- **Grav security rules for nginx & Caddy**: the `grav` preset now emits the
+  access-control rules Grav's `.htaccess` provides on Apache — blocking direct
+  access to `user/{accounts,config,env}`, non-media files under `user/data`,
+  scripts in `system`/`vendor`/`user`, dotenv files, etc. (mirrors Grav 2.0's
+  shipped `webserver-configs`). Caddy uses `path_regexp` matchers since its
+  inline path matchers don't support regex.
 - **Reverse-proxy vhosts**: `vhost add --proxy http://localhost:5173` renders a
   proxy vhost (no PHP) on Caddy/nginx/Apache — for Vite, Node, and other
   upstream dev servers.

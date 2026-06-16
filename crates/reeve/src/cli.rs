@@ -139,6 +139,9 @@ pub enum ServerCommands {
         /// Serve a catch-all default site (sites root) on the HTTP port.
         #[arg(long)]
         default_site: bool,
+        /// Framework preset for the default site: generic|laravel|wordpress|symfony|grav|drupal.
+        #[arg(long, default_value = "generic")]
+        preset: String,
     },
     /// Start a server.
     Start { name: String },

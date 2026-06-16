@@ -49,6 +49,7 @@ impl Caddy {
                     )
                 })?;
                 out.push_str(&format!("\troot * {}\n", quote(&v.effective_docroot())));
+                out.push_str(crate::preset::caddy_security(v.preset));
                 out.push_str(&format!(
                     "\tphp_fastcgi {}\n",
                     quote(&format!("unix/{}", php.fpm_socket))
@@ -80,6 +81,7 @@ impl Caddy {
             let php_sock = super::default_php_socket(state, cfg);
             let body = |out: &mut String| {
                 out.push_str(&format!("\troot * {}\n", quote(root)));
+                out.push_str(crate::preset::caddy_security(server.default_preset));
                 if let Some(sock) = &php_sock {
                     out.push_str(&format!(
                         "\tphp_fastcgi {}\n",
@@ -226,6 +228,7 @@ mod tests {
             https_port: 443,
             enabled: true,
             default_site: false,
+            default_preset: Framework::Generic,
             settings: Default::default(),
         }
     }

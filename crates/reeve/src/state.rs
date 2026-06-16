@@ -65,6 +65,11 @@ pub struct Server {
     /// `http://localhost:<port>`). Uses the default PHP version for `.php`.
     #[serde(default)]
     pub default_site: bool,
+    /// Framework preset applied to the default site's docroot (front-controller
+    /// rewrites + security rules), mirroring a vhost's `preset`. Generic =
+    /// plain try_files. Only meaningful when `default_site` is true.
+    #[serde(default)]
+    pub default_preset: Framework,
     /// Per-backend tunables (keys defined by each backend; see
     /// `backends::settings_defs`). Empty = all defaults.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -478,6 +483,7 @@ mod tests {
             https_port: https,
             enabled: false,
             default_site: false,
+            default_preset: Framework::Generic,
             settings: Default::default(),
         }
     }

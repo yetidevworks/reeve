@@ -340,8 +340,10 @@ fn cmd_server(c: ServerCommands) -> Result<()> {
             http,
             https,
             default_site,
+            preset,
         } => {
             let backend = Backend::from_str(&backend)?;
+            let default_preset = state::Framework::from_str(&preset)?;
             let name = name.unwrap_or_else(|| backend.to_string());
             let mut state = load_state()?;
             state.add_server(Server {
@@ -351,6 +353,7 @@ fn cmd_server(c: ServerCommands) -> Result<()> {
                 https_port: https,
                 enabled: false,
                 default_site,
+                default_preset,
                 settings: Default::default(),
             })?;
             save_state(&state)?;

@@ -54,7 +54,12 @@ fn is_descendant_of(pid: u32, ancestor: u32) -> bool {
             .stderr(Stdio::null())
             .output()
             .ok()
-            .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u32>().ok());
+            .and_then(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .parse::<u32>()
+                    .ok()
+            });
         match ppid {
             Some(p) => cur = p,
             None => return false,

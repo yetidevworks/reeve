@@ -207,7 +207,7 @@ pub const BACKENDS: [Backend; 4] = [
     Backend::Ols,
 ];
 /// Editable fields in the server modal (Backend, HTTP, HTTPS, Default site).
-pub const SERVER_FIELDS: usize = 4;
+pub const SERVER_FIELDS: usize = 5;
 
 /// Modal form state for editing a server's ports/backend.
 pub struct ServerWizard {
@@ -216,6 +216,8 @@ pub struct ServerWizard {
     pub https: String,
     /// Serve a catch-all default site on the HTTP port.
     pub default_site: bool,
+    /// Index into `Framework::all()` for the default site's preset.
+    pub preset_idx: usize,
     pub field: usize,
     pub error: Option<String>,
     /// `Some(orig)` when editing an existing server; `None` when creating one.
@@ -852,6 +854,10 @@ fn open_edit_server(app: &mut App) {
         http: s.http_port.to_string(),
         https: s.https_port.to_string(),
         default_site: s.default_site,
+        preset_idx: crate::state::Framework::all()
+            .iter()
+            .position(|f| *f == s.default_preset)
+            .unwrap_or(0),
         field: 0,
         error: None,
         editing: Some(s.name),
@@ -866,6 +872,7 @@ fn open_new_server(app: &mut App) {
         http: "80".into(),
         https: "443".into(),
         default_site: false,
+        preset_idx: 0,
         field: 0,
         error: None,
         editing: None,
@@ -1022,6 +1029,14 @@ fn handle_server_wizard_key(app: &mut App, code: KeyCode) {
         KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if w.field == 3 => {
             w.default_site = !w.default_site
         }
+        // Default-site preset cycle.
+        KeyCode::Left if w.field == 4 => {
+            let n = crate::state::Framework::all().len();
+            w.preset_idx = (w.preset_idx + n - 1) % n;
+        }
+        KeyCode::Right | KeyCode::Char(' ') if w.field == 4 => {
+            w.preset_idx = (w.preset_idx + 1) % crate::state::Framework::all().len();
+        }
         KeyCode::Backspace => match w.field {
             1 => {
                 w.http.pop();
@@ -1046,6 +1061,7 @@ fn submit_server_wizard(app: &mut App) {
     let editing = w.editing.clone();
     let backend = BACKENDS[w.backend_idx];
     let default_site = w.default_site;
+    let default_preset = crate::state::Framework::all()[w.preset_idx];
     let http: Result<u16, _> = w.http.parse();
     let https: Result<u16, _> = w.https.parse();
 
@@ -1086,6 +1102,7 @@ fn submit_server_wizard(app: &mut App) {
                 srv.http_port = http;
                 srv.https_port = https;
                 srv.default_site = default_site;
+                srv.default_preset = default_preset;
                 crate::state::save_state(&state)?;
                 Ok(format!(
                     "updated '{name}' ({backend} :{http}/:{https}) — press 'r' to apply"
@@ -1101,6 +1118,7 @@ fn submit_server_wizard(app: &mut App) {
                     https_port: https,
                     enabled: false,
                     default_site,
+                    default_preset,
                     settings: Default::default(),
                 })?;
                 crate::state::save_state(&state)?;
