@@ -68,6 +68,19 @@ impl Apache {
         ));
         out.push_str("ServerName localhost\n");
         out.push_str(&format!("Timeout {}\n", server.setting("timeout", "300")));
+        // Keep connections alive between requests. Apache's from-scratch default
+        // (no httpd.conf include) leaves this off, so a browser page load opens a
+        // fresh TCP+TLS connection per asset — the dominant cost on HTTPS. brew's
+        // default config enables it; reeve must too or it feels markedly slower.
+        out.push_str("KeepAlive On\n");
+        out.push_str(&format!(
+            "KeepAliveTimeout {}\n",
+            server.setting("keepalive_timeout", "5")
+        ));
+        out.push_str(&format!(
+            "MaxKeepAliveRequests {}\n",
+            server.setting("max_keepalive_requests", "100")
+        ));
         out.push_str(&format!(
             "LimitRequestBody {}\n",
             server.setting("limit_request_body", "0")

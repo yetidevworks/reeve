@@ -97,6 +97,18 @@ pub fn settings_defs(backend: Backend) -> &'static [SettingDef] {
                 default: "300",
                 help: "request timeout",
             },
+            SettingDef {
+                key: "keepalive_timeout",
+                label: "Keep-alive (s)",
+                default: "5",
+                help: "idle conn hold",
+            },
+            SettingDef {
+                key: "max_keepalive_requests",
+                label: "Max keep-alive reqs",
+                default: "100",
+                help: "0 = unlimited",
+            },
         ],
         Backend::Nginx => &[
             SettingDef {
