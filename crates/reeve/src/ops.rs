@@ -7,6 +7,7 @@ use crate::brew::Brew;
 use crate::config::{load_config, save_config};
 use crate::daemon::{self, Status};
 use crate::php;
+use crate::probe::{self, PortState};
 use crate::services;
 use crate::ssl;
 use crate::state::{
@@ -21,6 +22,93 @@ pub fn require_server(name: &str) -> Result<Server> {
         .get_server(name)
         .cloned()
         .ok_or_else(|| anyhow!("Server '{name}' not found"))
+}
+
+/// The honest, port-aware state of a web server — what launchd *and* the
+/// network agree on, so reeve never claims "running" for a server bound to
+/// nothing or one whose port a foreign process has stolen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServeState {
+    /// Not loaded and nothing on its port.
+    Stopped,
+    /// Our launchd job is bound to its port and serving.
+    Serving,
+    /// launchd job is loaded but nothing is listening (empty config / bind
+    /// failure) — the case that previously showed a misleading "running".
+    LoadedNotBound,
+    /// A process reeve doesn't manage holds one of the server's ports.
+    PortConflict { port: u16, holder: String, pid: u32 },
+    /// launchd reports the job crashed.
+    Crashed,
+}
+
+impl ServeState {
+    /// Short status string for the CLI/TUI status column.
+    pub fn label(&self) -> String {
+        match self {
+            ServeState::Stopped => "stopped".to_string(),
+            ServeState::Serving => "running".to_string(),
+            ServeState::LoadedNotBound => "loaded, not bound".to_string(),
+            ServeState::PortConflict { port, holder, .. } => {
+                format!(":{port} held by {holder}")
+            }
+            ServeState::Crashed => "crashed".to_string(),
+        }
+    }
+}
+
+/// The TCP ports a server will actually bind: always HTTP, plus HTTPS when it
+/// serves a default site or any SSL vhost.
+fn ports_to_bind(server: &Server, state: &crate::state::State) -> Vec<u16> {
+    let mut ports = vec![server.http_port];
+    let needs_https = server.default_site
+        || crate::park::effective_vhosts_for(state, &server.name)
+            .iter()
+            .any(|v| v.ssl);
+    if needs_https {
+        ports.push(server.https_port);
+    }
+    ports
+}
+
+/// Resolve a server's honest, port-aware state (see [`ServeState`]).
+pub fn serve_state(server: &Server) -> ServeState {
+    let id = server_service_id(server);
+    let our = daemon::pid(&id);
+    let state = load_state().unwrap_or_default();
+    // A foreign holder on any port we'd bind is a conflict, whether or not our
+    // own job happens to be loaded.
+    if let Some((port, pid, holder)) = probe::first_foreign(&ports_to_bind(server, &state), our) {
+        return ServeState::PortConflict { port, holder, pid };
+    }
+    match probe::classify_port(server.http_port, our) {
+        PortState::OursBound => ServeState::Serving,
+        PortState::Foreign { pid, name } => ServeState::PortConflict {
+            port: server.http_port,
+            holder: name,
+            pid,
+        },
+        PortState::Free => match daemon::status(&id) {
+            Status::Running => ServeState::LoadedNotBound,
+            Status::Error => ServeState::Crashed,
+            Status::Stopped => ServeState::Stopped,
+        },
+    }
+}
+
+/// Refuse to start a server when a process reeve doesn't manage already holds
+/// one of its ports — the launchd job would load but silently fail to bind.
+fn preflight_ports(server: &Server) -> Result<()> {
+    let id = server_service_id(server);
+    let our = daemon::pid(&id);
+    let state = load_state().unwrap_or_default();
+    if let Some((port, pid, name)) = probe::first_foreign(&ports_to_bind(server, &state), our) {
+        bail!(
+            "Port {port} is already in use by '{name}' (pid {pid}), which reeve doesn't manage. \
+             Stop it (e.g. `brew services stop {name}`) or change this server's port, then retry."
+        );
+    }
+    Ok(())
 }
 
 /// Flip a server's enabled flag and persist.
@@ -65,6 +153,7 @@ pub fn render_server(server: &Server) -> Result<()> {
 /// Render, install the launchd service, and (re)start a server. Marks enabled.
 pub fn start_server(name: &str) -> Result<Status> {
     let server = require_server(name)?;
+    preflight_ports(&server)?;
     render_server(&server)?;
     let brew = Brew::detect()?;
     let backend = backend_for(server.backend);
@@ -288,6 +377,7 @@ pub fn set_default_php(version: &str) -> Result<()> {
 /// Re-render and restart a running server (picks up config changes).
 pub fn restart_server(name: &str) -> Result<Status> {
     let server = require_server(name)?;
+    preflight_ports(&server)?;
     render_server(&server)?;
     let brew = Brew::detect()?;
     let backend = backend_for(server.backend);
@@ -295,4 +385,26 @@ pub fn restart_server(name: &str) -> Result<Status> {
     daemon::install(&spec)?;
     daemon::restart(&server_service_id(&server))?;
     Ok(daemon::status(&server_service_id(&server)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serve_state_labels() {
+        assert_eq!(ServeState::Serving.label(), "running");
+        assert_eq!(ServeState::Stopped.label(), "stopped");
+        assert_eq!(ServeState::LoadedNotBound.label(), "loaded, not bound");
+        assert_eq!(ServeState::Crashed.label(), "crashed");
+        assert_eq!(
+            ServeState::PortConflict {
+                port: 80,
+                holder: "httpd".into(),
+                pid: 42,
+            }
+            .label(),
+            ":80 held by httpd"
+        );
+    }
 }

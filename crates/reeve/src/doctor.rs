@@ -3,11 +3,12 @@
 //! into a flat list of pass/warn/fail checks shared by the `doctor` CLI command
 //! and (as a one-line summary) the TUI.
 
-use crate::backends::{backend_for, server_service_id};
+use crate::backends::backend_for;
 use crate::brew::Brew;
 use crate::config::Config;
 use crate::daemon::{self, Status};
 use crate::dns;
+use crate::ops::ServeState;
 use crate::php;
 use crate::services;
 use crate::ssl;
@@ -90,23 +91,32 @@ pub fn run(brew: Option<&Brew>, cfg: &Config, state: &State) -> Vec<Check> {
                 continue;
             }
         }
-        if s.enabled {
-            let (health, detail) = match daemon::status(&server_service_id(s)) {
-                Status::Running => (
-                    Health::Ok,
-                    format!("running on :{}/:{}", s.http_port, s.https_port),
-                ),
-                Status::Stopped => (Health::Warn, "enabled but not running".to_string()),
-                Status::Error => (Health::Fail, "crashed — check `reeve logs`".to_string()),
-            };
-            checks.push(Check::new(format!("server {}", s.name), health, detail));
-        } else {
-            checks.push(Check::new(
-                format!("server {}", s.name),
+        // Honest, port-aware status: launchd "running" is not enough — the
+        // process must actually be bound, and no foreign process may hold the
+        // port (checked even for disabled servers, to catch e.g. a stray
+        // `brew services` httpd sitting on :80).
+        let (health, detail) = match crate::ops::serve_state(s) {
+            ServeState::Serving => (
                 Health::Ok,
-                "stopped".to_string(),
-            ));
-        }
+                format!("running on :{}/:{}", s.http_port, s.https_port),
+            ),
+            ServeState::Stopped => (Health::Ok, "stopped".to_string()),
+            ServeState::LoadedNotBound => (
+                Health::Fail,
+                format!(
+                    "loaded but not listening on :{} — empty config or failed bind (`reeve logs server-{}`)",
+                    s.http_port, s.name
+                ),
+            ),
+            ServeState::PortConflict { port, holder, pid } => (
+                Health::Fail,
+                format!("port {port} held by '{holder}' (pid {pid}) — not managed by reeve"),
+            ),
+            ServeState::Crashed => {
+                (Health::Fail, "crashed — check `reeve logs`".to_string())
+            }
+        };
+        checks.push(Check::new(format!("server {}", s.name), health, detail));
     }
 
     // PHP: formula installed + FPM socket alive.

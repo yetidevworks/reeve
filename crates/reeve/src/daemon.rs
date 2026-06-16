@@ -200,6 +200,28 @@ pub fn status(service: &str) -> Status {
     }
 }
 
+/// The PID launchd currently reports for a service, if it is running. Parsed
+/// from `launchctl list <label>` (the `"PID" = N;` line).
+pub fn pid(service: &str) -> Option<u32> {
+    let out = Command::new("launchctl")
+        .args(["list", &label(service)])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    for line in s.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("\"PID\" = ") {
+            return rest.trim_end_matches(';').trim().parse::<u32>().ok();
+        }
+    }
+    None
+}
+
 /// True if a unix socket path exists and is a socket (cheap FPM health check).
 pub fn socket_alive(path: &Path) -> bool {
     use std::os::unix::fs::FileTypeExt;

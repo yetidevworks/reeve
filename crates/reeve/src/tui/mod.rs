@@ -42,7 +42,7 @@ pub struct App {
     pub sel_php: usize,
     pub sel_vhost: usize,
     pub sel_service: usize,
-    pub server_status: Vec<Status>,
+    pub server_status: Vec<crate::ops::ServeState>,
     pub php_status: Vec<Status>,
     pub service_status: Vec<Status>,
     /// Parked-directory sites expanded from `state.parks` (read-only, derived).
@@ -335,7 +335,7 @@ impl App {
             .state
             .servers
             .iter()
-            .map(|s| daemon::status(&crate::backends::server_service_id(s)))
+            .map(crate::ops::serve_state)
             .collect();
         self.php_status = self
             .state

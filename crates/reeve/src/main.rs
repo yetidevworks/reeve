@@ -11,6 +11,7 @@ mod park;
 mod paths;
 mod php;
 mod preset;
+mod probe;
 mod services;
 mod ssl;
 mod state;
@@ -371,14 +372,13 @@ fn cmd_server(c: ServerCommands) -> Result<()> {
                     "NAME", "BACKEND", "HTTP", "HTTPS"
                 );
                 for s in &state.servers {
-                    let status = daemon::status(&server_service_id(s));
                     println!(
                         "{:<14} {:<8} {:<7} {:<7} {}",
                         s.name,
                         s.backend,
                         s.http_port,
                         s.https_port,
-                        status.as_str()
+                        ops::serve_state(s).label()
                     );
                 }
             }

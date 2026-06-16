@@ -829,6 +829,21 @@ fn status_span(status: Status) -> Span<'static> {
     Span::styled(dot, Style::default().fg(color))
 }
 
+/// Honest, port-aware status marker for a web server row.
+fn serve_state_span(state: &crate::ops::ServeState) -> Span<'static> {
+    use crate::ops::ServeState as S;
+    let (text, color) = match state {
+        S::Serving => ("● running".to_string(), Color::Green),
+        S::Stopped => ("○ stopped".to_string(), Color::DarkGray),
+        S::LoadedNotBound => ("⚠ loaded, not bound".to_string(), Color::Yellow),
+        S::PortConflict { port, holder, .. } => {
+            (format!("✗ :{port} held by {holder}"), Color::Red)
+        }
+        S::Crashed => ("✗ crashed".to_string(), Color::Red),
+    };
+    Span::styled(text, Style::default().fg(color))
+}
+
 fn row_style(selected: bool, focused: bool) -> Style {
     if selected && focused {
         Style::default().add_modifier(Modifier::REVERSED)
@@ -850,7 +865,11 @@ fn render_servers(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     }
     for (i, s) in app.state.servers.iter().enumerate() {
         let sel = i == app.sel_server;
-        let status = app.server_status.get(i).copied().unwrap_or(Status::Stopped);
+        let status = app
+            .server_status
+            .get(i)
+            .cloned()
+            .unwrap_or(crate::ops::ServeState::Stopped);
         // Pad the ports into a fixed-width column so the status marker aligns
         // whether ports are short (:80/:443) or long (:8080/:8443).
         let ports = format!(":{}/:{}", s.http_port, s.https_port);
@@ -862,7 +881,8 @@ fn render_servers(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             ports,
         );
         lines.push(
-            Line::from(vec![Span::raw(head), status_span(status)]).style(row_style(sel, focused)),
+            Line::from(vec![Span::raw(head), serve_state_span(&status)])
+                .style(row_style(sel, focused)),
         );
     }
     f.render_widget(
