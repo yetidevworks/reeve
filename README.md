@@ -90,6 +90,18 @@ cargo install --path crates/reeve
 
 Download from [GitHub Releases](https://github.com/yetidevworks/reeve/releases).
 
+### Updating
+
+```bash
+reeve update           # update to the latest release
+reeve update --check   # just check whether a newer version exists
+```
+
+`update` detects how reeve was installed. Homebrew and cargo installs print the
+matching upgrade command (`brew upgrade reeve` / `cargo install --force
+reeve-cli`); a plain binary (e.g. under `~/.local/bin`) is downloaded and
+replaced in place. Quit and relaunch reeve afterwards to pick up the new binary.
+
 ## Quick start
 
 ```bash
@@ -209,6 +221,7 @@ The new-vhost wizard (`n` on Vhosts) covers framework **presets** and a
 | `validate` | Run every backend's native config test |
 | `logs [<target>] [-n N] [--follow]` | View or tail a service's log |
 | `doctor` | Diagnose the whole stack (brew, servers, FPM, services, DNS, certs, ports) |
+| `update [--check]` | Self-update to the latest GitHub release (`--check` only reports) |
 | `ssl mint <host>` / `ssl trust` / `ssl untrust` / `ssl status` / `ssl ca` | Local certificates: mint one, install/remove the mkcert CA in the trust store, or show its state |
 | `dns setup` / `dns status` | Wildcard `*.test` DNS |
 

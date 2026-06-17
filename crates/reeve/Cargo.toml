@@ -32,3 +32,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ratatui = "0.30"
 crossterm = "0.29"
 libc = "0.2"
+ureq = { version = "2", features = ["json"] }

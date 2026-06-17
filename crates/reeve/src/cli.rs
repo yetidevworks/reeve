@@ -69,6 +69,13 @@ pub enum Commands {
     /// Diagnose the stack: Homebrew, servers, FPM, DNS, certs, ports.
     Doctor,
 
+    /// Self-update reeve to the latest GitHub release.
+    Update {
+        /// Only report whether an update is available; don't install.
+        #[arg(long)]
+        check: bool,
+    },
+
     /// (hidden) Render one TUI frame to text — for testing without a terminal.
     #[command(hide = true)]
     TuiSnapshot {

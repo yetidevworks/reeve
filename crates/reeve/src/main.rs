@@ -59,6 +59,7 @@ async fn main() -> Result<()> {
             follow,
         }) => cmd_logs(target, lines, follow),
         Some(Commands::Doctor) => cmd_doctor(),
+        Some(Commands::Update { check }) => update::run(check),
         Some(Commands::TuiSnapshot {
             width,
             height,

@@ -2,6 +2,14 @@
 
 All notable changes to reeve are documented here.
 
+## 0.2.2
+
+### Added
+- `update [--check]` — self-update reeve to the latest GitHub release. Detects
+  how reeve was installed: Homebrew and cargo installs print the right upgrade
+  command, while a plain binary (e.g. under `~/.local/bin`) is downloaded and
+  replaced in place. `--check` only reports whether a newer version exists.
+
 ## 0.2.1
 
 ### Fixed
