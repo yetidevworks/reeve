@@ -2,6 +2,17 @@
 
 All notable changes to reeve are documented here.
 
+## 0.2.1
+
+### Fixed
+- Vhost save no longer appends the hostname to a docroot that ends in a slash.
+  The path dropdown leaves a trailing slash when you enter a folder, so editing
+  a vhost to point at a shared directory (e.g. `~/workspace/`) silently became
+  `~/workspace/<host>`, a missing folder Apache served as 403 Forbidden. The
+  host is now only appended for a brand-new vhost left at the untouched default
+  sites root; otherwise the chosen directory is used verbatim, letting several
+  hosts share one docroot.
+
 ## 0.2.0
 
 Stack expansion (databases/services, PHP tuning, presets, parking),

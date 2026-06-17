@@ -2190,15 +2190,20 @@ fn submit_wizard(app: &mut App) {
     let preset = w.preset;
     let proxy = w.proxy.trim().to_string();
     let is_proxy = !proxy.is_empty();
+    let is_editing = w.editing.is_some();
     let raw_root = w.docroot.trim();
+    let sites_root = app.config.sites_root.trim_end_matches('/');
     let docroot = if raw_root.is_empty() {
-        format!("{}/{}", app.config.sites_root.trim_end_matches('/'), name)
-    } else if raw_root.ends_with('/') {
-        // Left on a directory — treat it as the parent and use the host as the
-        // project folder, e.g. ~/Sites/ + app.test → ~/Sites/app.test.
-        format!("{raw_root}{name}")
+        format!("{sites_root}/{name}")
+    } else if !is_editing && raw_root.trim_end_matches('/') == sites_root {
+        // New vhost left at the untouched default root: scaffold a per-host
+        // folder, e.g. ~/Sites/ + app.test → ~/Sites/app.test.
+        format!("{sites_root}/{name}")
     } else {
-        raw_root.to_string()
+        // Respect the chosen directory verbatim. A trailing slash (the path
+        // dropdown adds one when you enter a folder) must not silently append
+        // the host — that's what broke several hosts sharing one docroot.
+        raw_root.trim_end_matches('/').to_string()
     };
 
     let set_err = |app: &mut App, msg: String| {
