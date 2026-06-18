@@ -105,6 +105,9 @@ pub enum PhpCommands {
     List,
     /// Set the default PHP version for new vhosts.
     Use { version: String },
+    /// Switch the CLI `php` (via the ~/.reeve/bin shim). Omit the version to
+    /// show the current one.
+    Cli { version: Option<String> },
     /// Manage PHP extensions for a version.
     #[command(subcommand)]
     Ext(ExtCommands),

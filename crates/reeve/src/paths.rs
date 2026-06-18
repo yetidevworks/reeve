@@ -41,6 +41,14 @@ pub fn run_dir() -> Result<PathBuf> {
     Ok(home.join(".reeve").join("run"))
 }
 
+/// CLI shim directory (`~/.reeve/bin`). Holds symlinks (`php`, `pecl`, …) that
+/// point at the user's chosen CLI PHP version. Kept under `~/.reeve` (not the
+/// config root) so it's a short, space-free path the user prepends to PATH.
+pub fn shim_dir() -> Result<PathBuf> {
+    let home = dirs::home_dir().context("Could not determine home directory")?;
+    Ok(home.join(".reeve").join("bin"))
+}
+
 /// mkcert-minted per-vhost certificates.
 pub fn certs_dir() -> Result<PathBuf> {
     Ok(config_dir()?.join("certs"))
@@ -62,6 +70,7 @@ pub fn ensure_dirs() -> Result<()> {
         generated_dir()?.join("ols"),
         generated_dir()?.join("fpm"),
         run_dir()?,
+        shim_dir()?,
         certs_dir()?,
         logs_dir()?,
     ] {

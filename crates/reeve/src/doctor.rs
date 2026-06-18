@@ -151,6 +151,26 @@ pub fn run(brew: Option<&Brew>, cfg: &Config, state: &State) -> Vec<Check> {
         }
     }
 
+    // CLI php shim: only reported once the user has opted in by setting one.
+    if let Some(cli_ver) = php::current_cli_php() {
+        let on_path = brew.map(php::shim_on_path).unwrap_or(false);
+        if on_path {
+            checks.push(Check::new(
+                "cli php",
+                Health::Ok,
+                format!("{cli_ver} (~/.reeve/bin on PATH)"),
+            ));
+        } else {
+            checks.push(Check::new(
+                "cli php",
+                Health::Warn,
+                format!(
+                    "shim set to {cli_ver} but ~/.reeve/bin isn't ahead of Homebrew on PATH — add it to use it"
+                ),
+            ));
+        }
+    }
+
     // Managed services: formula installed + launchd status + port reachable.
     for svc in &state.services {
         let id = services::service_id(svc.kind);

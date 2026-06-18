@@ -249,6 +249,7 @@ fn cmd_php(c: PhpCommands) -> Result<()> {
             println!("✓ Default PHP set to {version}");
             Ok(())
         }
+        PhpCommands::Cli { version } => cmd_php_cli(version),
         PhpCommands::Ext(ext) => cmd_php_ext(ext),
         PhpCommands::Settings { version } => {
             let state = load_state()?;
@@ -285,6 +286,41 @@ fn cmd_php(c: PhpCommands) -> Result<()> {
             let mode = state::XdebugMode::from_str(&mode)?;
             ops::set_xdebug(&version, mode)?;
             println!("✓ PHP {version}: Xdebug {} (FPM restarted)", mode.as_str());
+            Ok(())
+        }
+    }
+}
+
+fn cmd_php_cli(version: Option<String>) -> Result<()> {
+    let brew = brew::Brew::detect()?;
+    let path_hint = |brew: &brew::Brew| -> Result<()> {
+        if !php::shim_on_path(brew) {
+            let shim = paths::shim_dir()?;
+            println!(
+                "\n⚠ {} is not ahead of Homebrew on your PATH, so this won't take effect yet.\n  \
+                 Add it to your shell profile (e.g. ~/.zshrc):\n      export PATH=\"{}:$PATH\"",
+                shim.display(),
+                shim.display()
+            );
+        }
+        Ok(())
+    };
+
+    match version {
+        Some(version) => {
+            php::set_cli_php(&brew, &version)?;
+            println!("✓ CLI php → {version}");
+            path_hint(&brew)?;
+            Ok(())
+        }
+        None => {
+            match php::current_cli_php() {
+                Some(v) => println!("CLI php: {v}"),
+                None => {
+                    println!("CLI php: not set — run `reeve php cli <version>` to point the shim.")
+                }
+            }
+            path_hint(&brew)?;
             Ok(())
         }
     }

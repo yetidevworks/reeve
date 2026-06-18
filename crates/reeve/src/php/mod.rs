@@ -9,7 +9,7 @@ use crate::daemon::{self, ServiceSpec};
 use crate::paths;
 use crate::state::PhpVersion;
 use anyhow::{bail, Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -361,17 +361,144 @@ pub fn ensure_fpm_running(brew: &Brew, php: &PhpVersion) -> Result<()> {
         }
         thread::sleep(Duration::from_millis(150));
     }
-    bail!(
-        "FPM master for PHP {version} started but socket {} never appeared. \
-         Check {}.",
-        socket.display(),
+
+    // Socket never showed. launchd's redirected log is frequently empty here:
+    // php-fpm sends startup errors to its own `[global] error_log`, and a
+    // dyld/link failure dies before any log opens at all. So capture the real
+    // reason ourselves with a synchronous config test, plus any FPM-log tail.
+    let diag = fpm_failure_diagnostics(brew, version, &conf);
+    let fpm_log = paths::logs_dir()?.join(format!("php{}-fpm.log", compact(version)));
+    let where_to_look = format!(
+        "Logs (if any): {} and {}.",
+        fpm_log.display(),
         launchd_log(version)?.display()
+    );
+    if diag.trim().is_empty() {
+        bail!(
+            "FPM master for PHP {version} started but its socket never appeared at {}.\n\
+             No diagnostics captured. {where_to_look}",
+            socket.display(),
+        )
+    }
+    bail!(
+        "FPM master for PHP {version} started but its socket never appeared at {}.\n\n{diag}\n\n\
+         {where_to_look}",
+        socket.display(),
     )
+}
+
+/// Best-effort diagnosis when an FPM master's socket never appears. launchd's
+/// redirected log is often empty in that case — php-fpm writes startup errors
+/// to its own `[global] error_log`, and a dyld/link failure dies before any log
+/// opens. So run `php-fpm -t` synchronously (we capture its stderr directly,
+/// including dyld/link/config errors the async launchd job swallows) and tail
+/// the FPM error log, returning whatever explains the failure.
+fn fpm_failure_diagnostics(brew: &Brew, version: &str, conf: &Path) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    let bin = fpm_binary(brew, version);
+    match Command::new(&bin)
+        .arg("-t")
+        .arg("--fpm-config")
+        .arg(conf)
+        .arg("-c")
+        .arg(ini_dir(brew, version))
+        .output()
+    {
+        Ok(o) => {
+            let mut text = String::from_utf8_lossy(&o.stderr).into_owned();
+            text.push_str(&String::from_utf8_lossy(&o.stdout));
+            let text = text.trim();
+            if !o.status.success() && !text.is_empty() {
+                parts.push(format!("php-fpm config test failed:\n{text}"));
+            }
+        }
+        Err(e) => parts.push(format!("could not run `{} -t`: {e}", bin.display())),
+    }
+
+    if let Ok(log) = paths::logs_dir().map(|d| d.join(format!("php{}-fpm.log", compact(version)))) {
+        if let Ok(contents) = std::fs::read_to_string(&log) {
+            let lines: Vec<&str> = contents.lines().collect();
+            let tail = lines[lines.len().saturating_sub(8)..].join("\n");
+            if !tail.trim().is_empty() {
+                parts.push(format!("Last lines of {}:\n{tail}", log.display()));
+            }
+        }
+    }
+
+    parts.join("\n\n")
 }
 
 /// Is this PHP version's brew formula installed?
 pub fn is_installed(brew: &Brew, version: &str) -> bool {
     brew.is_installed(&formula(version))
+}
+
+/// The toolchain binaries reeve shims for the CLI. `php` is the one that
+/// matters; the rest keep `pecl`/`phpize`/`php-config`/`phar` in lockstep so
+/// extension builds and version queries match the active CLI php.
+const SHIM_BINARIES: &[&str] = &["php", "php-config", "phpize", "pecl", "phar"];
+
+/// Point the `~/.reeve/bin` shims at `version`'s toolchain, making it the CLI
+/// `php` (for any shell with `~/.reeve/bin` ahead of Homebrew's bin on PATH).
+/// Pure symlink work — Homebrew's link state is never touched.
+pub fn set_cli_php(brew: &Brew, version: &str) -> Result<()> {
+    if !is_installed(brew, version) {
+        bail!("PHP {version} is not installed — run `reeve php install {version}` first.");
+    }
+    let shim = paths::shim_dir()?;
+    std::fs::create_dir_all(&shim)
+        .with_context(|| format!("Failed to create shim dir {}", shim.display()))?;
+    let bindir = brew.opt(&formula(version)).join("bin");
+
+    for name in SHIM_BINARIES {
+        let link = shim.join(name);
+        // Always clear the old shim first so a repoint can't fail on EEXIST and
+        // so binaries absent from the target version don't leave stale links.
+        let _ = std::fs::remove_file(&link);
+        let target = bindir.join(name);
+        if !target.exists() {
+            continue;
+        }
+        std::os::unix::fs::symlink(&target, &link).with_context(|| {
+            format!("Failed to link {} -> {}", link.display(), target.display())
+        })?;
+    }
+    Ok(())
+}
+
+/// The PHP version the CLI shim currently points at, if set. Read from the
+/// `~/.reeve/bin/php` symlink's `php@<ver>` target (no subprocess).
+pub fn current_cli_php() -> Option<String> {
+    let link = paths::shim_dir().ok()?.join("php");
+    let target = std::fs::read_link(&link).ok()?;
+    // …/opt/php@8.4/bin/php  ->  8.4
+    target
+        .components()
+        .find_map(|c| c.as_os_str().to_str()?.strip_prefix("php@"))
+        .map(str::to_string)
+}
+
+/// True when `~/.reeve/bin` is on PATH ahead of Homebrew's bin (so the shims
+/// actually win). Used to warn the user that switching won't take effect yet.
+pub fn shim_on_path(brew: &Brew) -> bool {
+    let Ok(shim) = paths::shim_dir() else {
+        return false;
+    };
+    let Ok(path) = std::env::var("PATH") else {
+        return false;
+    };
+    let brew_bin = brew.prefix.join("bin");
+    for entry in std::env::split_paths(&path) {
+        if entry == shim {
+            return true;
+        }
+        if entry == brew_bin {
+            // Homebrew's bin comes first — its linked php would shadow the shim.
+            return false;
+        }
+    }
+    false
 }
 
 /// Full install: ensure the tap + formula, then stand up the FPM master and

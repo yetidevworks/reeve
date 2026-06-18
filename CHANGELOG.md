@@ -2,6 +2,23 @@
 
 All notable changes to reeve are documented here.
 
+## 0.2.3
+
+### Added
+- `php cli [version]` — switch the terminal `php` (and `pecl`/`phpize`/
+  `php-config`/`phar`) to an installed version, like the old `sphp`. It works
+  by repointing symlinks in `~/.reeve/bin`, so Homebrew's link state is never
+  touched and switching is instant. Add `~/.reeve/bin` to the front of your
+  PATH once; `doctor` warns if it isn't, and `php cli` with no version reports
+  the current one.
+
+### Fixed
+- When an FPM master's socket never appears, `php install` / `apply` now run
+  `php-fpm -t` in-process and tail the FPM error log to report the real cause.
+  Previously the error pointed at the launchd log, which is usually empty —
+  php-fpm writes startup errors to its own `error_log`, and a dyld/link failure
+  dies before any log opens — so the failure was undiagnosable.
+
 ## 0.2.2
 
 ### Added

@@ -206,7 +206,8 @@ The new-vhost wizard (`n` on Vhosts) covers framework **presets** and a
 | --- | --- |
 | `init` | Detect Homebrew, scaffold config/state |
 | `php install <ver>` | Install (or adopt) a PHP version + FPM master |
-| `php list` / `php use <ver>` | List versions / set the default |
+| `php list` / `php use <ver>` | List versions / set the default for new vhosts |
+| `php cli [ver]` | Switch the terminal `php` (via the `~/.reeve/bin` shim); omit to show current |
 | `php ext add\|remove\|list <ver> [name]` | Manage extensions per version (pecl) |
 | `php settings <ver>` / `php set <ver> <key> <value>` | Show / tune php.ini, OPcache, FPM pool |
 | `php xdebug <ver> off\|debug\|profile` | Toggle Xdebug for a version |
@@ -224,6 +225,30 @@ The new-vhost wizard (`n` on Vhosts) covers framework **presets** and a
 | `update [--check]` | Self-update to the latest GitHub release (`--check` only reports) |
 | `ssl mint <host>` / `ssl trust` / `ssl untrust` / `ssl status` / `ssl ca` | Local certificates: mint one, install/remove the mkcert CA in the trust store, or show its state |
 | `dns setup` / `dns status` | Wildcard `*.test` DNS |
+
+## CLI PHP version
+
+`php cli <ver>` switches the `php` on your terminal — the modern replacement for
+the old `sphp` script. Instead of running `brew link` (which mutates Homebrew's
+global state and fights keg-only versions), reeve keeps a shim directory of
+symlinks at `~/.reeve/bin` (`php`, `pecl`, `phpize`, `php-config`, `phar`) and
+just repoints them. Switching is instant and Homebrew is never touched.
+
+Add the shim to the front of your PATH once:
+
+```bash
+# ~/.zshrc (or ~/.bashrc)
+export PATH="$HOME/.reeve/bin:$PATH"
+```
+
+```bash
+reeve php cli 8.4    # point the CLI at PHP 8.4
+reeve php cli        # show the current CLI version
+php -v               # PHP 8.4.x …
+```
+
+`doctor` warns if `~/.reeve/bin` isn't ahead of Homebrew on your PATH. To revert
+entirely, remove that line from your profile — nothing else changes.
 
 ## How it works
 
