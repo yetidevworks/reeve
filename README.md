@@ -234,10 +234,12 @@ global state and fights keg-only versions), reeve keeps a shim directory of
 symlinks at `~/.reeve/bin` (`php`, `pecl`, `phpize`, `php-config`, `phar`) and
 just repoints them. Switching is instant and Homebrew is never touched.
 
-Add the shim to the front of your PATH once:
+The shim needs to be on the front of your PATH once. `reeve init` and
+`reeve php cli` offer to add it to your shell profile automatically — or add it
+by hand:
 
 ```bash
-# ~/.zshrc (or ~/.bashrc)
+# ~/.zshrc (or ~/.bash_profile)
 export PATH="$HOME/.reeve/bin:$PATH"
 ```
 

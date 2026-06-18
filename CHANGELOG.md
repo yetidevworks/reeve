@@ -2,6 +2,15 @@
 
 All notable changes to reeve are documented here.
 
+## 0.2.4
+
+### Added
+- `php cli` and `reeve init` now offer to add `~/.reeve/bin` to your shell
+  profile (`~/.zshrc` / `~/.bash_profile`) so a CLI PHP switch actually takes
+  effect, instead of only printing the line. It skips the prompt when the line
+  is already there (just tells you to reload the shell), prints `fish_add_path`
+  guidance for fish, and never blocks when stdin isn't a TTY.
+
 ## 0.2.3
 
 ### Added

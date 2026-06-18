@@ -19,7 +19,7 @@ mod tui;
 mod update;
 mod vhost;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use backends::{backend_for, server_service_id};
 use clap::Parser;
 use cli::{
@@ -200,6 +200,10 @@ fn cmd_init() -> Result<()> {
         println!("  Adopt one with `reeve php install <version>` (reuses the brew install).");
     }
 
+    // Offer to put the CLI php shim (`reeve php cli`) on PATH now, so the
+    // one-time setup is handled up front instead of surfacing later.
+    offer_shim_path_setup(&brew)?;
+
     println!();
     println!("Next steps:");
     println!("  reeve php install 8.3       # install a PHP version + FPM master");
@@ -293,24 +297,13 @@ fn cmd_php(c: PhpCommands) -> Result<()> {
 
 fn cmd_php_cli(version: Option<String>) -> Result<()> {
     let brew = brew::Brew::detect()?;
-    let path_hint = |brew: &brew::Brew| -> Result<()> {
-        if !php::shim_on_path(brew) {
-            let shim = paths::shim_dir()?;
-            println!(
-                "\n⚠ {} is not ahead of Homebrew on your PATH, so this won't take effect yet.\n  \
-                 Add it to your shell profile (e.g. ~/.zshrc):\n      export PATH=\"{}:$PATH\"",
-                shim.display(),
-                shim.display()
-            );
-        }
-        Ok(())
-    };
-
     match version {
         Some(version) => {
             php::set_cli_php(&brew, &version)?;
             println!("✓ CLI php → {version}");
-            path_hint(&brew)?;
+            // The switch only takes effect once the shim wins on PATH — offer to
+            // wire that up rather than just printing the line to add.
+            offer_shim_path_setup(&brew)?;
             Ok(())
         }
         None => {
@@ -320,10 +313,75 @@ fn cmd_php_cli(version: Option<String>) -> Result<()> {
                     println!("CLI php: not set — run `reeve php cli <version>` to point the shim.")
                 }
             }
-            path_hint(&brew)?;
+            offer_shim_path_setup(&brew)?;
             Ok(())
         }
     }
+}
+
+/// When the `~/.reeve/bin` shim isn't effective on PATH, offer to add it to the
+/// user's shell profile (interactively), or print the line when we can't edit
+/// automatically. No-op when the shim already wins on PATH.
+fn offer_shim_path_setup(brew: &brew::Brew) -> Result<()> {
+    if php::shim_on_path(brew) {
+        return Ok(());
+    }
+    let shim = paths::shim_dir()?;
+    let export = format!("export PATH=\"{}:$PATH\"", shim.display());
+    let home = dirs::home_dir().context("Could not determine home directory")?;
+    let shell = std::env::var("SHELL").unwrap_or_default();
+
+    // fish uses different PATH syntax — guide rather than auto-edit it.
+    if shell.contains("fish") {
+        println!(
+            "\n⚠ {} isn't on your PATH yet. Add it (fish):\n      fish_add_path {}",
+            shim.display(),
+            shim.display()
+        );
+        return Ok(());
+    }
+
+    // macOS defaults to zsh; bash login shells read ~/.bash_profile.
+    let profile = if shell.contains("bash") {
+        home.join(".bash_profile")
+    } else {
+        home.join(".zshrc")
+    };
+
+    // Already written but not active in this shell → just needs a reload.
+    if std::fs::read_to_string(&profile)
+        .map(|c| c.contains(".reeve/bin"))
+        .unwrap_or(false)
+    {
+        println!(
+            "\n• {} already adds the shim to PATH — open a new terminal (or `exec $SHELL`) to pick it up.",
+            profile.display()
+        );
+        return Ok(());
+    }
+
+    println!(
+        "\n⚠ {} isn't ahead of Homebrew on your PATH, so `reeve php cli` won't take effect yet.",
+        shim.display()
+    );
+    if brew::confirm(&format!("Add it to {}?", profile.display()))? {
+        use std::io::Write;
+        let block = format!("\n# reeve: CLI php shim (reeve php cli <ver>)\n{export}\n");
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&profile)
+            .with_context(|| format!("Failed to open {}", profile.display()))?;
+        f.write_all(block.as_bytes())
+            .with_context(|| format!("Failed to write {}", profile.display()))?;
+        println!(
+            "✓ Added to {} — open a new terminal (or `exec $SHELL`) to use it.",
+            profile.display()
+        );
+    } else {
+        println!("  Add this line to your shell profile yourself:\n      {export}");
+    }
+    Ok(())
 }
 
 fn cmd_php_ext(ext: cli::ExtCommands) -> Result<()> {

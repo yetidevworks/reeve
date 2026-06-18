@@ -160,7 +160,7 @@ impl Brew {
 
 /// Prompt the user for a yes/no answer on the terminal. Defaults to "no" when
 /// stdin is not a TTY (e.g. scripted/CI runs), so we never block headless.
-fn confirm(question: &str) -> Result<bool> {
+pub fn confirm(question: &str) -> Result<bool> {
     if unsafe { libc::isatty(libc::STDIN_FILENO) } == 0 {
         return Ok(false);
     }
