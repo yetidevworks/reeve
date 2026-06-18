@@ -148,7 +148,7 @@ impl Nginx {
         // Catch-all default site: unmatched hosts (e.g. plain
         // http(s)://localhost:<port>) serve the sites root, on both ports.
         if server.default_site {
-            let root = q(cfg.sites_root.trim_end_matches('/'));
+            let root = q(server.effective_default_root(&cfg.sites_root));
             let php_sock = super::default_php_socket(state, cfg);
             let body = |out: &mut String| {
                 out.push_str("        server_name _;\n");

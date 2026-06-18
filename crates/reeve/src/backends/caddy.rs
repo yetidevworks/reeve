@@ -77,7 +77,7 @@ impl Caddy {
         // http(s)://localhost:<port>) serves the sites root. Rendered on both
         // the HTTP port and the HTTPS port (with a localhost cert).
         if server.default_site {
-            let root = cfg.sites_root.trim_end_matches('/');
+            let root = server.effective_default_root(&cfg.sites_root);
             let php_sock = super::default_php_socket(state, cfg);
             let body = |out: &mut String| {
                 out.push_str(&format!("\troot * {}\n", quote(root)));
@@ -229,6 +229,7 @@ mod tests {
             enabled: true,
             default_site: false,
             default_preset: Framework::Generic,
+            default_root: None,
             settings: Default::default(),
         }
     }

@@ -236,7 +236,7 @@ pub const BACKENDS: [Backend; 4] = [
     Backend::Ols,
 ];
 /// Editable fields in the server modal (Backend, HTTP, HTTPS, Default site).
-pub const SERVER_FIELDS: usize = 5;
+pub const SERVER_FIELDS: usize = 6;
 
 /// Modal form state for editing a server's ports/backend.
 pub struct ServerWizard {
@@ -247,6 +247,8 @@ pub struct ServerWizard {
     pub default_site: bool,
     /// Index into `Framework::all()` for the default site's preset.
     pub preset_idx: usize,
+    /// Docroot for the default site; empty = fall back to the global sites root.
+    pub default_root: String,
     pub field: usize,
     pub error: Option<String>,
     /// `Some(orig)` when editing an existing server; `None` when creating one.
@@ -585,11 +587,19 @@ impl App {
         self.refresh();
     }
 
-    /// Rewrite the real home path to a generic one when the anonymizer is on,
-    /// so screenshots don't leak the username. No-op otherwise.
+    /// Display transform for paths. With the anonymizer on, rewrite the real
+    /// home to a generic one so screenshots don't leak the username. Otherwise
+    /// abbreviate the home prefix to `~` (paths outside home stay absolute).
     pub fn anon(&self, s: &str) -> String {
         match (self.anonymize, &self.anon_home) {
             (true, Some(home)) => s.replace(home.as_str(), "/Users/andy"),
+            (false, Some(home)) => {
+                if s == home {
+                    "~".to_string()
+                } else {
+                    s.replace(&format!("{home}/"), "~/")
+                }
+            }
             _ => s.to_string(),
         }
     }
@@ -1078,6 +1088,7 @@ fn open_edit_server(app: &mut App) {
             .iter()
             .position(|f| *f == s.default_preset)
             .unwrap_or(0),
+        default_root: s.default_root.clone().unwrap_or_default(),
         field: 0,
         error: None,
         editing: Some(s.name),
@@ -1093,6 +1104,7 @@ fn open_new_server(app: &mut App) {
         https: "443".into(),
         default_site: false,
         preset_idx: 0,
+        default_root: String::new(),
         field: 0,
         error: None,
         editing: None,
@@ -1264,8 +1276,13 @@ fn handle_server_wizard_key(app: &mut App, code: KeyCode) {
             2 => {
                 w.https.pop();
             }
+            5 => {
+                w.default_root.pop();
+            }
             _ => {}
         },
+        // Default-root is a free-text path field (any character).
+        KeyCode::Char(c) if w.field == 5 => w.default_root.push(c),
         // Ports accept digits only.
         KeyCode::Char(c) if c.is_ascii_digit() => match w.field {
             1 => w.http.push(c),
@@ -1282,6 +1299,10 @@ fn submit_server_wizard(app: &mut App) {
     let backend = BACKENDS[w.backend_idx];
     let default_site = w.default_site;
     let default_preset = crate::state::Framework::all()[w.preset_idx];
+    let default_root = {
+        let r = w.default_root.trim();
+        (!r.is_empty()).then(|| r.to_string())
+    };
     let http: Result<u16, _> = w.http.parse();
     let https: Result<u16, _> = w.https.parse();
 
@@ -1323,6 +1344,7 @@ fn submit_server_wizard(app: &mut App) {
                 srv.https_port = https;
                 srv.default_site = default_site;
                 srv.default_preset = default_preset;
+                srv.default_root = default_root;
                 crate::state::save_state(&state)?;
                 Ok(format!(
                     "updated '{name}' ({backend} :{http}/:{https}) — press 'r' to apply"
@@ -1339,6 +1361,7 @@ fn submit_server_wizard(app: &mut App) {
                     enabled: false,
                     default_site,
                     default_preset,
+                    default_root,
                     settings: Default::default(),
                 })?;
                 crate::state::save_state(&state)?;

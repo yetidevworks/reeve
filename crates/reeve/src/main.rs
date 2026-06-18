@@ -436,6 +436,7 @@ fn cmd_server(c: ServerCommands) -> Result<()> {
             http,
             https,
             default_site,
+            root,
             preset,
         } => {
             let backend = Backend::from_str(&backend)?;
@@ -450,6 +451,7 @@ fn cmd_server(c: ServerCommands) -> Result<()> {
                 enabled: false,
                 default_site,
                 default_preset,
+                default_root: root.filter(|r| !r.trim().is_empty()),
                 settings: Default::default(),
             })?;
             save_state(&state)?;

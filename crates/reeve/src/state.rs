@@ -70,6 +70,12 @@ pub struct Server {
     /// plain try_files. Only meaningful when `default_site` is true.
     #[serde(default)]
     pub default_preset: Framework,
+    /// Docroot for this server's catch-all default site. `None` falls back to
+    /// the global `config.sites_root`, so existing servers keep serving the
+    /// shared root; set it to give one server its own default root. Only
+    /// meaningful when `default_site` is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_root: Option<String>,
     /// Per-backend tunables (keys defined by each backend; see
     /// `backends::settings_defs`). Empty = all defaults.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -83,6 +89,15 @@ impl Server {
             .get(key)
             .map(|s| s.as_str())
             .unwrap_or(default)
+    }
+
+    /// The default site's docroot: this server's override, else the global
+    /// sites root. Trailing slash trimmed. Only used when `default_site` is on.
+    pub fn effective_default_root<'a>(&'a self, sites_root: &'a str) -> &'a str {
+        self.default_root
+            .as_deref()
+            .unwrap_or(sites_root)
+            .trim_end_matches('/')
     }
 }
 
@@ -499,8 +514,20 @@ mod tests {
             enabled: false,
             default_site: false,
             default_preset: Framework::Generic,
+            default_root: None,
             settings: Default::default(),
         }
+    }
+
+    #[test]
+    fn default_root_overrides_else_falls_back_to_sites_root() {
+        let mut s = server("a", 80, 443);
+        // No override → global sites root (trailing slash trimmed).
+        assert_eq!(s.effective_default_root("/Sites"), "/Sites");
+        assert_eq!(s.effective_default_root("/Sites/"), "/Sites");
+        // Override wins, also trimmed.
+        s.default_root = Some("/var/www/".into());
+        assert_eq!(s.effective_default_root("/Sites"), "/var/www");
     }
 
     #[test]

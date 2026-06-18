@@ -46,6 +46,7 @@ the thing the old switcher-script approach can't do.
   user-run dnsmasq (no root daemon).
 - **Default site** — optionally serve a catch-all from your sites root (with an
   optional framework preset), so `http(s)://localhost` works without a vhost.
+  Each server can override its default root, or share the global sites root.
 - **`logs` + `doctor`** — tail any service's log, and a one-shot health check of
   the whole stack (Homebrew, servers, FPM, services, DNS, certs, ports).
 - **Honest, port-aware status** — `running` only when the port is actually bound;
@@ -211,7 +212,7 @@ The new-vhost wizard (`n` on Vhosts) covers framework **presets** and a
 | `php ext add\|remove\|list <ver> [name]` | Manage extensions per version (pecl) |
 | `php settings <ver>` / `php set <ver> <key> <value>` | Show / tune php.ini, OPcache, FPM pool |
 | `php xdebug <ver> off\|debug\|profile` | Toggle Xdebug for a version |
-| `server add <backend> [--http N --https N] [--default-site] [--preset <fw>]` | Add caddy\|apache\|nginx (optionally a catch-all default site) |
+| `server add <backend> [--http N --https N] [--default-site] [--root <dir>] [--preset <fw>]` | Add caddy\|apache\|nginx (optionally a catch-all default site; `--root` overrides its docroot, else the global sites root) |
 | `server start\|stop\|restart\|list\|remove <name>` | Manage a server (independent) |
 | `vhost add <host> --root <dir> --php <ver> --server <name> [--ssl] [--preset <fw>] [--proxy <url>]` | Add a vhost |
 | `vhost list\|remove <host>` | Manage vhosts |

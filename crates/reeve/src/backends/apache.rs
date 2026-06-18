@@ -200,7 +200,7 @@ impl Apache {
         // default, so unmatched hosts (e.g. http(s)://localhost:<port>) serve
         // the sites root instead of a 403. Rendered on both HTTP and HTTPS.
         if server.default_site {
-            let root = cfg.sites_root.trim_end_matches('/');
+            let root = server.effective_default_root(&cfg.sites_root);
             let php_sock = super::default_php_socket(state, cfg);
             let body = |out: &mut String| {
                 out.push_str("    ServerName localhost\n");

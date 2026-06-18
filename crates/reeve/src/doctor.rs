@@ -309,6 +309,7 @@ mod tests {
             enabled,
             default_site: false,
             default_preset: Default::default(),
+            default_root: None,
             settings: Default::default(),
         }
     }

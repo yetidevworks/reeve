@@ -530,6 +530,15 @@ fn render_server_wizard(f: &mut Frame, app: &App) {
                 crate::state::Framework::all()[w.preset_idx].as_str()
             ),
         ),
+        field_line(
+            5,
+            "Default root:",
+            if w.default_root.is_empty() && w.field != 5 {
+                format!("{} (global sites root)", app.anon(&app.config.sites_root))
+            } else {
+                cursor(&w.default_root, w.field == 5)
+            },
+        ),
         Line::raw(""),
     ];
     if let Some(err) = &w.error {
@@ -944,10 +953,16 @@ fn render_servers(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             s.backend,
             ports,
         );
-        lines.push(
-            Line::from(vec![Span::raw(head), serve_state_span(&status)])
-                .style(row_style(sel, focused)),
-        );
+        let mut spans = vec![Span::raw(head), serve_state_span(&status)];
+        // Catch-all default-site root, aligned with the vhost/parked path column.
+        if s.default_site {
+            let root = s.effective_default_root(&app.config.sites_root);
+            spans.push(Span::styled(
+                format!("   {}", app.anon(root)),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        lines.push(Line::from(spans).style(row_style(sel, focused)));
     }
     f.render_widget(
         Paragraph::new(lines).block(panel_block("Servers", focused)),

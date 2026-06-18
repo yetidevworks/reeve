@@ -2,6 +2,19 @@
 
 All notable changes to reeve are documented here.
 
+## 0.2.5
+
+### Added
+- Per-server default-site docroot. Each server can have its own `default_root`
+  (CLI `server add --root <dir>`, or the "Default root" field in the server
+  edit modal); unset falls back to the global `sites_root`, so existing setups
+  are unchanged. The Servers panel now shows each server's effective default
+  root, aligned with the vhost/parked path column.
+
+### Changed
+- TUI path columns abbreviate your home directory to `~` (paths outside home
+  stay absolute) — shorter and easier to scan.
+
 ## 0.2.4
 
 ### Added
