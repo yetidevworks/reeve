@@ -350,13 +350,23 @@ pub fn ensure_fpm_running(brew: &Brew, php: &PhpVersion) -> Result<()> {
         run_at_load: true,
     };
     daemon::install(&spec)?;
+
+    // Remove any pre-existing socket before (re)starting so the health check
+    // can't be fooled into reporting success against a stale socket — or one a
+    // hand-run `php-fpm` is holding open — that our launchd job doesn't own.
+    let socket = fpm_socket(version)?;
+    let _ = std::fs::remove_file(&socket);
+
     daemon::restart(&service_id(version))?;
 
-    // Health check: wait for the socket to appear.
-    let socket = fpm_socket(version)?;
+    // Health check: require launchd to actually own a running master AND the
+    // socket to be live. A socket file alone is not enough (a foreign/stale
+    // process can hold one); a PID alone is not enough (the master may still be
+    // binding). Both together mean *our* FPM master is up and accepting work.
+    let service = service_id(version);
     let deadline = Instant::now() + Duration::from_secs(8);
     while Instant::now() < deadline {
-        if daemon::socket_alive(&socket) {
+        if daemon::pid(&service).is_some() && daemon::socket_alive(&socket) {
             return Ok(());
         }
         thread::sleep(Duration::from_millis(150));

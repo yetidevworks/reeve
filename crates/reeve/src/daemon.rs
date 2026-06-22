@@ -123,50 +123,101 @@ pub fn install(spec: &ServiceSpec) -> Result<()> {
     Ok(())
 }
 
-/// Load (start) a service. Tolerates "already loaded".
+/// The per-user GUI launchd domain target, e.g. `gui/501`. All of reeve's
+/// services are user LaunchAgents, so they live in this domain.
+fn domain() -> String {
+    // Safe: getuid() has no failure mode and no memory safety concerns.
+    format!("gui/{}", unsafe { libc::getuid() })
+}
+
+/// Full service target within the GUI domain, e.g. `gui/501/com.reeve.php-85`.
+fn service_target(service: &str) -> String {
+    format!("{}/{}", domain(), label(service))
+}
+
+/// Load (start) a service via the modern `launchctl bootstrap` API.
+///
+/// We deliberately avoid the legacy `launchctl load -w`: on macOS 26 (Tahoe)
+/// `load -w` silently refuses to start a label that launchd has marked
+/// *disabled* (e.g. after an earlier crash-loop auto-disabled it), and reports
+/// success while spawning nothing. `enable` reliably clears that sticky disabled
+/// flag, and `bootstrap` is the supported way to load a plist into a domain.
 pub fn load(service: &str) -> Result<()> {
     let path = plist_path(service)?;
     if !path.exists() {
         bail!("No plist for service '{service}'. Install it first.");
     }
-    let out = Command::new("launchctl")
-        .args(["load", "-w"])
-        .arg(&path)
-        .output()
-        .context("Failed to run launchctl load")?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        if !stderr.contains("already loaded") && !stderr.trim().is_empty() {
-            bail!("launchctl load failed: {}", stderr.trim());
+
+    // Clear any sticky "disabled" state so bootstrap can actually start it.
+    // Best-effort: a never-disabled label makes this a no-op.
+    let _ = Command::new("launchctl")
+        .args(["enable", &service_target(service)])
+        .output();
+
+    // bootstrap can transiently fail with "Input/output error" (errno 5) while a
+    // just-booted-out job in the same domain is still tearing down. That's a
+    // "retry" signal, not a real failure, so spin briefly before giving up.
+    for attempt in 0..6 {
+        let out = Command::new("launchctl")
+            .arg("bootstrap")
+            .arg(domain())
+            .arg(&path)
+            .output()
+            .context("Failed to run launchctl bootstrap")?;
+        if out.status.success() {
+            return Ok(());
         }
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        // Already loaded is the desired end state.
+        if stderr.contains("already bootstrapped")
+            || stderr.contains("already loaded")
+            || stderr.contains("service already loaded")
+            || stderr.contains("Operation already in progress")
+        {
+            return Ok(());
+        }
+        // Domain still busy from a prior bootout — wait and retry.
+        let retryable = stderr.contains("Input/output error") || stderr.contains(": 5:");
+        if retryable && attempt < 5 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            continue;
+        }
+        if !stderr.trim().is_empty() {
+            bail!("launchctl bootstrap failed: {}", stderr.trim());
+        }
+        return Ok(());
     }
     Ok(())
 }
 
-/// Unload (stop) a service. Tolerates "not loaded".
+/// Unload (stop) a service via `launchctl bootout`. Tolerates "not loaded".
 pub fn unload(service: &str) -> Result<()> {
     let path = plist_path(service)?;
     if !path.exists() {
         return Ok(());
     }
     let out = Command::new("launchctl")
-        .arg("unload")
-        .arg(&path)
+        .arg("bootout")
+        .arg(service_target(service))
         .output()
-        .context("Failed to run launchctl unload")?;
+        .context("Failed to run launchctl bootout")?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        if !stderr.contains("not loaded")
-            && !stderr.contains("Could not find")
-            && !stderr.trim().is_empty()
-        {
-            bail!("launchctl unload failed: {}", stderr.trim());
+        // Not loaded / unknown is the desired end state already.
+        let benign = stderr.contains("No such process")
+            || stderr.contains("not loaded")
+            || stderr.contains("Could not find")
+            || stderr.contains("could not find");
+        if !benign && !stderr.trim().is_empty() {
+            bail!("launchctl bootout failed: {}", stderr.trim());
         }
     }
     Ok(())
 }
 
-/// Restart = unload then load. Picks up config changes.
+/// Restart = bootout then bootstrap. The full unload/load cycle (rather than
+/// `kickstart`) is required so a rewritten plist's new `ProgramArguments` are
+/// actually re-read — `kickstart` would just re-run the already-loaded job def.
 pub fn restart(service: &str) -> Result<()> {
     unload(service).ok();
     load(service)

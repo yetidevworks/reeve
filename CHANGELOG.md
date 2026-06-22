@@ -2,6 +2,23 @@
 
 All notable changes to reeve are documented here.
 
+## 0.2.6
+
+### Fixed
+- FPM masters failing to start on macOS 26 (Tahoe) with "FPM master started
+  but its socket never appeared". reeve now loads launchd jobs with the modern
+  `launchctl bootstrap`/`bootout` API (in the `gui/<uid>` domain) instead of the
+  legacy `load -w`/`unload`. On recent macOS, `load -w` silently refuses to
+  start a label that launchd has marked *disabled* (e.g. after an earlier
+  crash-loop auto-disabled it) while still reporting success; loading now runs
+  `launchctl enable` first to clear that sticky state, and retries `bootstrap`
+  while a just-removed job is still tearing down.
+- `php install` no longer reports an FPM master as "ready" when it isn't. The
+  post-start health check now requires launchd to actually own a running master
+  (a real PID) *and* the socket to be live — previously a leftover or hand-run
+  socket at the same path could make a failed start look successful. The old
+  socket is also removed before restart so a stale one can't mask a failure.
+
 ## 0.2.5
 
 ### Added
