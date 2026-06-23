@@ -2,6 +2,21 @@
 
 All notable changes to reeve are documented here.
 
+## 0.2.7
+
+### Added
+- Vhost and Parked URLs in the dashboard are now real OSC 8 hyperlinks. Capable
+  terminals (iTerm2, Ghostty, WezTerm, Kitty, …) make them click-to-open
+  (usually with the terminal's modifier, e.g. Cmd-click in iTerm2), instead of
+  relying on loose URL auto-detection. Terminals without OSC 8 support just
+  render the plain underlined text, unchanged. Because ratatui's cell buffer
+  can't carry OSC 8, the links are stamped onto the terminal after each draw and
+  re-applied on scroll/selection changes.
+
+### Changed
+- The URL underline now spans only the address itself, not the padding out to
+  the column width, so it lines up with the terminal's own hyperlink underline.
+
 ## 0.2.6
 
 ### Fixed

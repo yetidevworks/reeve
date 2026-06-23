@@ -1,7 +1,7 @@
 //! Rendering for the stacked dashboard (ytunnel-style: bordered panels, accent
 //! on focus, status line at the bottom).
 
-use super::{App, Panel, PanelHit};
+use super::{App, HyperLink, Panel, PanelHit};
 use crate::daemon::Status;
 use crate::doctor::Health;
 use ratatui::{
@@ -15,6 +15,10 @@ use ratatui::{
 const ACCENT: Color = Color::Cyan;
 
 pub fn render(f: &mut Frame, app: &App) {
+    // Cleared each frame; the vhost/parked panels repopulate it, and run_loop
+    // stamps the entries as OSC 8 hyperlinks after the draw completes.
+    app.links.borrow_mut().clear();
+
     let servers_h = (app.state.servers.len() as u16 + 2).clamp(3, 14);
     let php_h = 3;
     let services_h = (app.state.services.len() as u16 + 2).clamp(3, 8);
@@ -1229,6 +1233,41 @@ pub fn vhost_url(app: &App, vhost: &crate::state::Vhost) -> String {
     }
 }
 
+/// Record a clickable URL region for a vhost/parked row so it can be stamped as
+/// an OSC 8 hyperlink after the draw. `row` is the visible (0-based) index of the
+/// line within the panel. The link text begins after the panel's 1-cell border
+/// and the 3-char row prefix (`" › "`), and is clipped to the panel's inner width
+/// so it never overruns into the neighbouring columns — but `url` stays whole so
+/// a click still opens the full address even when the visible text is truncated.
+fn record_link(
+    app: &App,
+    area: ratatui::layout::Rect,
+    row: usize,
+    url: String,
+    sel: bool,
+    focused: bool,
+) {
+    let x = area.x + 4;
+    let y = area.y + 1 + row as u16;
+    let last_inner = area.x + area.width.saturating_sub(2);
+    if x > last_inner {
+        return;
+    }
+    let avail = (last_inner - x + 1) as usize;
+    let text: String = url.chars().take(avail).collect();
+    if text.is_empty() {
+        return;
+    }
+    app.links.borrow_mut().push(HyperLink {
+        x,
+        y,
+        text,
+        url,
+        reversed: sel && focused,
+        bold: sel && !focused,
+    });
+}
+
 /// First visible row index for a list of `len` rows in a `view_h`-tall panel,
 /// chosen to keep `sel` on screen (centered when scrolling is needed). Returns
 /// 0 when everything fits.
@@ -1258,18 +1297,24 @@ fn render_vhosts(f: &mut Frame, app: &App, area: ratatui::layout::Rect) -> usize
     for (i, v) in app.state.vhosts.iter().enumerate().skip(off).take(view_h) {
         let sel = i == app.sel_vhost;
         let url = vhost_url(app, v);
-        // The URL is plain text so iTerm2/Ghostty auto-linkify it for cmd-click.
+        // Recorded as an OSC 8 hyperlink (stamped after draw) so the URL is
+        // click-to-open in capable terminals, not just auto-linkified text.
+        record_link(app, area, i - off, url.clone(), sel, focused);
+        // Underline only the URL itself (not the padding to col 30), so it lines
+        // up with the terminal's own OSC 8 hyperlink underline.
+        let pad = 30usize.saturating_sub(url.chars().count());
         lines.push(
             Line::from(vec![
                 Span::raw(format!(" {} ", if sel && focused { "›" } else { " " })),
                 Span::styled(
-                    format!("{url:<30}"),
+                    url.clone(),
                     Style::default()
                         .fg(ACCENT)
                         .add_modifier(Modifier::UNDERLINED),
                 ),
                 Span::raw(format!(
-                    " {:<8} {:<5} {}",
+                    "{:pad$} {:<8} {:<5} {}",
+                    "",
                     v.server,
                     v.php_version,
                     app.anon(&v.docroot)
@@ -1311,17 +1356,20 @@ fn render_parked(f: &mut Frame, app: &App, area: ratatui::layout::Rect) -> usize
         let sel = i == app.sel_parked;
         let scheme = if v.ssl { "https" } else { "http" };
         let url = format!("{scheme}://{}", v.server_name);
+        record_link(app, area, i - off, url.clone(), sel, focused);
+        let pad = 30usize.saturating_sub(url.chars().count());
         lines.push(
             Line::from(vec![
                 Span::raw(format!(" {} ", if sel && focused { "›" } else { " " })),
                 Span::styled(
-                    format!("{url:<30}"),
+                    url.clone(),
                     Style::default()
                         .fg(ACCENT)
                         .add_modifier(Modifier::UNDERLINED),
                 ),
                 Span::raw(format!(
-                    " {:<8} {:<5} {}",
+                    "{:pad$} {:<8} {:<5} {}",
+                    "",
                     v.server,
                     v.php_version,
                     app.anon(&v.docroot)

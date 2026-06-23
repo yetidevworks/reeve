@@ -25,7 +25,7 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, layout::Rect, Terminal};
 use std::cell::RefCell;
-use std::io::{self, Stdout};
+use std::io::{self, Stdout, Write as _};
 use std::time::Duration;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -49,6 +49,23 @@ pub struct PanelHit {
     pub len: usize,
 }
 
+/// A clickable URL region recorded during render. After each `terminal.draw`,
+/// `run_loop` re-stamps these cells with OSC 8 hyperlink escapes so capable
+/// terminals (iTerm2, Ghostty, WezTerm, Kitty, …) make them click-to-open.
+/// ratatui's cell buffer can't carry OSC 8, so we inject it post-draw.
+pub struct HyperLink {
+    /// Top-left cell of the link text (absolute terminal coordinates).
+    pub x: u16,
+    pub y: u16,
+    /// The visible link text (already clamped to fit the panel width).
+    pub text: String,
+    /// The URL to open (same as `text` here, kept separate for clarity).
+    pub url: String,
+    /// Row styling to reproduce so the stamp matches what ratatui drew.
+    pub reversed: bool,
+    pub bold: bool,
+}
+
 pub struct App {
     pub config: Config,
     pub state: State,
@@ -65,6 +82,9 @@ pub struct App {
     /// Panel rects from the last render, for mouse hit-testing. Interior
     /// mutability because `ui::render` takes `&App`.
     pub hit_rects: RefCell<Vec<PanelHit>>,
+    /// Clickable URL regions from the last render, stamped as OSC 8 hyperlinks
+    /// after each draw. Interior mutability because `ui::render` takes `&App`.
+    pub links: RefCell<Vec<HyperLink>>,
     /// Secret screenshot helper: when on, displayed paths have the real home
     /// dir rewritten to `/Users/andy` so they don't leak the username. Toggled
     /// with `~` (deliberately absent from the key bar).
@@ -331,6 +351,7 @@ impl App {
             sel_service: 0,
             sel_parked: 0,
             hit_rects: RefCell::new(Vec::new()),
+            links: RefCell::new(Vec::new()),
             anonymize: false,
             anon_home: std::env::var("HOME").ok().filter(|h| !h.is_empty()),
             server_status: Vec::new(),
@@ -700,6 +721,9 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) ->
             app.force_clear = false;
         }
         terminal.draw(|f| ui::render(f, app))?;
+        // ratatui can't store OSC 8 in its cell buffer, so stamp the recorded
+        // URL regions as real hyperlinks straight onto the backend after draw.
+        emit_hyperlinks(terminal, app)?;
 
         // Poll with a timeout so statuses refresh even without keypresses.
         if event::poll(Duration::from_millis(2000))? {
@@ -2533,6 +2557,51 @@ fn run_ext_op(pe: &PendingExt) -> Result<String> {
             ))
         }
     }
+}
+
+/// Stamp the URL regions recorded during the last render as OSC 8 hyperlinks.
+///
+/// ratatui's diff-based draw owns the cell grid and has no concept of OSC 8, so
+/// we write the escapes directly to the backend afterwards: for each region we
+/// reposition the cursor, reproduce the row's styling, then print the link text
+/// wrapped in `ESC]8;;URL ST … ESC]8;; ST`. We re-stamp every frame; if a later
+/// draw repaints those cells (scroll, selection move) it clears the link, but
+/// the next post-draw pass restores it. Cursor is saved/restored so we don't
+/// disturb ratatui's position. Skipped while a modal is open (it would cover the
+/// panels, and stamping links onto a modal would be wrong).
+fn emit_hyperlinks(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> Result<()> {
+    if app.modal_open() {
+        app.links.borrow_mut().clear();
+        return Ok(());
+    }
+    let links = app.links.borrow();
+    if links.is_empty() {
+        return Ok(());
+    }
+    let mut out = String::new();
+    out.push_str("\x1b7"); // save cursor (DECSC)
+    for link in links.iter() {
+        // Cursor position is 1-based: ESC[<row>;<col>H.
+        out.push_str(&format!("\x1b[{};{}H", link.y + 1, link.x + 1));
+        // Match what ratatui drew: cyan + underline, plus the row's emphasis.
+        let mut sgr = String::from("0;36;4"); // reset; fg cyan; underline
+        if link.reversed {
+            sgr.push_str(";7");
+        }
+        if link.bold {
+            sgr.push_str(";1");
+        }
+        out.push_str(&format!("\x1b[{sgr}m"));
+        // OSC 8 open, link text, OSC 8 close, then reset attributes.
+        out.push_str(&format!("\x1b]8;;{}\x1b\\", link.url));
+        out.push_str(&link.text);
+        out.push_str("\x1b]8;;\x1b\\\x1b[0m");
+    }
+    out.push_str("\x1b8"); // restore cursor (DECRC)
+    let backend = terminal.backend_mut();
+    backend.write_all(out.as_bytes())?;
+    backend.flush()?;
+    Ok(())
 }
 
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
