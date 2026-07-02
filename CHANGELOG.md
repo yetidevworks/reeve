@@ -2,6 +2,24 @@
 
 All notable changes to reeve are documented here.
 
+## 0.2.8
+
+### Added
+- Set the CLI `php` version straight from the dashboard: press `C` on the PHP
+  panel to point the `~/.reeve/bin` shim at the selected version (the same thing
+  `reeve php cli <ver>` does), without dropping to a terminal. The PHP panel
+  title now shows the current CLI version, e.g. `PHP  (cli: 8.5)`.
+
+### Changed
+- Changing the default PHP version now takes effect immediately. Setting the
+  default (via `reeve php use <ver>`, or `d` on the dashboard's PHP panel) also
+  re-renders and restarts every *running* server that serves a catch-all default
+  site (e.g. `localhost` serving the sites root). Previously the default site's
+  FPM socket is baked into each server's config, so the change didn't reach a
+  running server until it was manually restarted — the default site kept serving
+  the old version. Only running default-site servers are touched; stopped ones
+  are left stopped.
+
 ## 0.2.7
 
 ### Added

@@ -987,8 +987,31 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         },
         KeyCode::Char('d') if app.focus == Panel::Php => {
             if let Some(ver) = app.selected_php_version() {
-                let r = ops::set_default_php(&ver).map(|_| format!("default PHP set to {ver}"));
+                let r = ops::set_default_php(&ver).map(|restarted| {
+                    if restarted.is_empty() {
+                        format!("default PHP set to {ver}")
+                    } else {
+                        format!(
+                            "default PHP set to {ver} — restarted {}",
+                            restarted.join(", ")
+                        )
+                    }
+                });
                 app.act("default", r);
+            }
+        }
+        // 'C' = make the selected version the CLI `php` (points the ~/.reeve/bin
+        // shim). Mirrors `reeve php cli <ver>` without leaving the dashboard.
+        KeyCode::Char('C') if app.focus == Panel::Php => {
+            if let Some(ver) = app.selected_php_version() {
+                let r = ops::set_cli_php(&ver).map(|on_path| {
+                    if on_path {
+                        format!("CLI php → {ver}")
+                    } else {
+                        format!("CLI php → {ver} (add ~/.reeve/bin to PATH to activate)")
+                    }
+                });
+                app.act("cli php", r);
             }
         }
         KeyCode::Char('e') => match app.focus {

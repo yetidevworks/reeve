@@ -614,6 +614,7 @@ fn render_keys(f: &mut Frame, app: &App, area: Rect) {
             ("s", "settings"),
             ("X", "xdebug"),
             ("d", "default"),
+            ("C", "cli php"),
             ("R/del", "remove"),
             ("L", "log"),
             ("q", "quit"),
@@ -977,6 +978,12 @@ fn render_servers(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 fn render_php(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let focused = app.focus == Panel::Php;
     let default = app.config.default_php.clone();
+    let cli = crate::php::current_cli_php();
+    // The CLI `php` version isn't per-item obvious, so name it in the title.
+    let title = match &cli {
+        Some(v) => format!("PHP  (cli: {v})"),
+        None => "PHP".to_string(),
+    };
     let mut spans: Vec<Span> = vec![Span::raw(" ")];
     if app.state.php_versions.is_empty() {
         spans.push(Span::styled(
@@ -1000,7 +1007,7 @@ fn render_php(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         spans.push(Span::raw("   "));
     }
     f.render_widget(
-        Paragraph::new(Line::from(spans)).block(panel_block("PHP", focused)),
+        Paragraph::new(Line::from(spans)).block(panel_block(&title, focused)),
         area,
     );
 }

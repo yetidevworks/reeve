@@ -249,8 +249,19 @@ fn cmd_php(c: PhpCommands) -> Result<()> {
             Ok(())
         }
         PhpCommands::Use { version } => {
-            ops::set_default_php(&version)?;
+            let restarted = ops::set_default_php(&version)?;
             println!("✓ Default PHP set to {version}");
+            if !restarted.is_empty() {
+                println!(
+                    "  restarted {} to pick it up: {}",
+                    if restarted.len() == 1 {
+                        "server"
+                    } else {
+                        "servers"
+                    },
+                    restarted.join(", ")
+                );
+            }
             Ok(())
         }
         PhpCommands::Cli { version } => cmd_php_cli(version),

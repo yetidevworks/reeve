@@ -454,11 +454,40 @@ pub fn remove_park(root: &str) -> Result<()> {
     save_state(&state)
 }
 
-/// Set the default PHP version for new vhosts.
-pub fn set_default_php(version: &str) -> Result<()> {
+/// Set the default PHP version. This governs both new vhosts *and* every
+/// server's catch-all default site (e.g. `localhost` serving the sites root).
+/// The default site's FPM socket is baked into each server's generated config,
+/// so a plain config change doesn't reach a running server — it keeps proxying
+/// to the old version until restarted. To make the switch take effect right
+/// away, any *running* server that serves a default site is re-rendered and
+/// restarted here. Returns the names of the servers that were restarted so the
+/// caller can report them.
+pub fn set_default_php(version: &str) -> Result<Vec<String>> {
     let mut cfg = load_config()?;
     cfg.default_php = Some(version.to_string());
-    save_config(&cfg)
+    save_config(&cfg)?;
+
+    // Only default-site servers embed the default PHP socket, and we only touch
+    // ones already running — restarting a stopped server would silently start it.
+    let state = load_state()?;
+    let mut restarted = Vec::new();
+    for server in state.servers.iter().filter(|s| s.default_site) {
+        if serve_state(server) == ServeState::Serving {
+            restart_server(&server.name)?;
+            restarted.push(server.name.clone());
+        }
+    }
+    Ok(restarted)
+}
+
+/// Point the CLI `php` shim (`~/.reeve/bin`) at a version, making it the default
+/// terminal `php`. Returns whether the shim currently wins on `PATH` — when it
+/// doesn't, the switch won't take effect until the user adds `~/.reeve/bin`
+/// ahead of Homebrew's bin (the CLI's `reeve php cli` offers to wire that up).
+pub fn set_cli_php(version: &str) -> Result<bool> {
+    let brew = Brew::detect()?;
+    php::set_cli_php(&brew, version)?;
+    Ok(php::shim_on_path(&brew))
 }
 
 /// Re-render and restart a running server (picks up config changes).
