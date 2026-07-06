@@ -7,7 +7,8 @@
 use std::collections::HashSet;
 use std::process::{Command, Stdio};
 
-/// PIDs holding a LISTEN socket on `port` (IPv4 or IPv6), via `lsof`.
+/// PIDs holding a LISTEN socket on `port` (IPv4 or IPv6), via `lsof` (macOS).
+#[cfg(target_os = "macos")]
 pub fn port_listeners(port: u16) -> Vec<u32> {
     let out = Command::new("lsof")
         .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-t"])
@@ -20,6 +21,44 @@ pub fn port_listeners(port: u16) -> Vec<u32> {
             .collect(),
         Err(_) => Vec::new(),
     }
+}
+
+/// PIDs holding a LISTEN socket on `port`, via `ss` (Linux). `lsof` is often
+/// absent on minimal Linux installs, but `ss` (iproute2) is near-universal.
+/// Without root, `ss -p` still reveals the pid for the current user's own
+/// sockets — which is exactly what reeve needs to recognize its own servers.
+#[cfg(target_os = "linux")]
+pub fn port_listeners(port: u16) -> Vec<u32> {
+    let out = Command::new("ss")
+        .args(["-Htlnp"])
+        .stderr(Stdio::null())
+        .output();
+    let Ok(o) = out else {
+        return Vec::new();
+    };
+    let want = port.to_string();
+    let mut pids = Vec::new();
+    for line in String::from_utf8_lossy(&o.stdout).lines() {
+        // Columns: State Recv-Q Send-Q Local:Port Peer:Port [Process].
+        // Match the local address column ending in `:<port>`.
+        let local = match line.split_whitespace().nth(3) {
+            Some(l) => l,
+            None => continue,
+        };
+        if local.rsplit(':').next() != Some(want.as_str()) {
+            continue;
+        }
+        // Extract every `pid=NNN` from the process column
+        // (`users:(("caddy",pid=295,fd=3))`).
+        for tok in line.split(|c: char| !c.is_ascii_alphanumeric() && c != '=') {
+            if let Some(n) = tok.strip_prefix("pid=") {
+                if let Ok(p) = n.parse::<u32>() {
+                    pids.push(p);
+                }
+            }
+        }
+    }
+    pids
 }
 
 /// Human-readable command name for a pid (`ps -o comm=`), for conflict messages.

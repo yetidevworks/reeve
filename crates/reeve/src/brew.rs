@@ -14,11 +14,12 @@ pub struct Brew {
 
 impl Brew {
     /// Detect the active Homebrew install. Checks the canonical Apple-silicon /
-    /// Intel locations by absolute path first — `which brew` is unreliable under
-    /// non-login shells (SSH, launchd) where `.zprofile` hasn't run — then falls
-    /// back to `brew --prefix` for unusual custom prefixes.
+    /// Intel / Linuxbrew locations by absolute path first — `which brew` is
+    /// unreliable under non-login shells (SSH, launchd, systemd) where
+    /// `.zprofile`/`.bashrc` hasn't run — then falls back to `brew --prefix` for
+    /// unusual custom prefixes.
     pub fn detect() -> Result<Self> {
-        for candidate in ["/opt/homebrew", "/usr/local"] {
+        for candidate in ["/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew"] {
             let p = Path::new(candidate);
             if p.join("bin/brew").exists() {
                 return Ok(Self {

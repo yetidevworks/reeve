@@ -111,7 +111,7 @@ pub struct App {
     /// A PHP version queued for install — run_loop suspends the TUI, installs
     /// it (showing brew output), then resumes. Avoids a frozen screen.
     pub pending_install: Option<String>,
-    /// Whether `*.tld` system resolution is configured (/etc/resolver present).
+    /// Whether `*.tld` system resolution is configured (host resolver present).
     pub dns_ok: bool,
     /// "remove server <name>?" confirmation, when showing.
     pub confirm_remove_server: Option<String>,
@@ -944,15 +944,16 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('?') => open_doctor(app),
         KeyCode::Char('T') => {
             app.message = "installing mkcert CA into the trust store…".into();
-            let r = Brew::detect().and_then(|brew| ssl::ensure_ca(&brew)).map(|newly| {
-                if newly {
-                    "✓ mkcert CA installed — local HTTPS is now trusted (restart the browser)"
-                        .to_string()
-                } else {
-                    "✓ mkcert CA already trusted — local HTTPS works (System keychain + Firefox)"
-                        .to_string()
-                }
-            });
+            let r = Brew::detect()
+                .and_then(|brew| ssl::ensure_ca(&brew))
+                .map(|newly| {
+                    if newly {
+                        "✓ mkcert CA installed — local HTTPS is now trusted (restart the browser)"
+                            .to_string()
+                    } else {
+                        "✓ mkcert CA already trusted — local HTTPS works".to_string()
+                    }
+                });
             app.act("ssl trust", r);
             // mkcert may pop an admin dialog — repaint to clear artifacts.
             app.force_clear = true;
@@ -1034,7 +1035,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                     if ok {
                         format!("{list} now resolve system-wide")
                     } else {
-                        "dnsmasq running but some /etc/resolver files not set".to_string()
+                        "dnsmasq running but the system resolver isn't fully set".to_string()
                     }
                 });
             app.act("dns setup", r);

@@ -8,12 +8,13 @@
        RunCloud, scaled down — for localhost.
 ```
 
-A local web development stack manager for macOS. Think RunCloud, scaled down,
-localhost-only, open source: provision and manage web servers, **per-vhost PHP
-versions**, SSL, and DNS — from one CLI and TUI.
+A local web development stack manager for **macOS and Linux**. Think RunCloud,
+scaled down, localhost-only, open source: provision and manage web servers,
+**per-vhost PHP versions**, SSL, and DNS — from one CLI and TUI.
 
 Written in Rust. It does not bundle servers or PHP; it orchestrates
-Homebrew-installed ones and manages them as your-user launchd services (no sudo).
+Homebrew-installed ones and manages them as per-user services — launchd on
+macOS, systemd user units on Linux — with no sudo for day-to-day use.
 
 ![reeve](screenshot.png)
 
@@ -34,7 +35,7 @@ the thing the old switcher-script approach can't do.
   (OpenLiteSpeed is wired but unsupported on macOS — see below).
 - **Run several servers at once**, on different ports, managed independently.
 - **Background services** — install/start/stop **MySQL, MariaDB, PostgreSQL,
-  Redis, memcached, Mailpit** via Homebrew + launchd, alongside the web stack.
+  Redis, memcached, Mailpit** via Homebrew + launchd/systemd, alongside the web stack.
 - **Framework presets** — `laravel`, `wordpress`, `symfony`, `grav`, `drupal`
   set the right docroot + rewrites automatically; or point a vhost at an
   upstream dev server as a **reverse proxy** (Vite, Node, …).
@@ -55,12 +56,17 @@ the thing the old switcher-script approach can't do.
 - **TUI dashboard** with live status — mouse-clickable, scrollable panels (a
   dedicated **Parked** panel for parked sites) — plus a scriptable CLI on the
   same engine.
-- **No sudo** for day-to-day use; servers bind 80/443 as your user via launchd.
+- **No sudo** for day-to-day use; servers bind 80/443 as your user via launchd
+  on macOS, or systemd user units on Linux (after a one-time `sysctl` that
+  `reeve init` offers to set up).
 
 ## Requirements
 
-- macOS (built and tested on macOS 26 "Tahoe", Apple Silicon)
+- **macOS** (built and tested on macOS 26 "Tahoe", Apple Silicon), or **Linux**
+  (Ubuntu-first; needs systemd with a user session bus, and systemd-resolved for
+  DNS). See [Linux notes](#linux) below.
 - [Homebrew](https://brew.sh) — reeve will offer to install it if missing
+  (Linuxbrew on Linux)
 
 ## Installation
 
@@ -135,12 +141,14 @@ reeve apply                                             # picks up new folders a
 One-time DNS + trust setup so `*.test` resolves system-wide and certs are trusted:
 
 ```bash
-reeve dns setup            # installs dnsmasq + wires /etc/resolver (one admin prompt)
+reeve dns setup            # installs dnsmasq + wires the system resolver
 reeve ssl trust            # install the mkcert CA into your trust store (once)
 ```
 
-`dns setup` writes the root-owned `/etc/resolver/<tld>` files itself via the
-native macOS admin dialog — no manual `sudo` needed. In the TUI, press `D`.
+`dns setup` points the system resolver at reeve's dnsmasq for each TLD. On macOS
+it writes the root-owned `/etc/resolver/<tld>` files via the native admin dialog
+— no manual `sudo`. On Linux it writes a systemd-resolved drop-in via `sudo`. In
+the TUI, press `D`.
 
 Then `https://app.test` just works in the browser.
 
@@ -257,13 +265,19 @@ entirely, remove that line from your profile — nothing else changes.
 
 `state.toml` is the single source of truth (servers, PHP versions, vhosts).
 reeve **renders** native configs (Caddyfile, httpd vhosts, nginx server
-blocks, FPM pools) into `generated/`, then reconciles launchd services to match.
-You never hand-edit generated files — you edit state via the CLI/TUI and `apply`.
+blocks, FPM pools) into `generated/`, then reconciles per-user services
+(launchd agents on macOS, systemd user units on Linux) to match. You never
+hand-edit generated files — you edit state via the CLI/TUI and `apply`.
 
 ```
+# macOS
 ~/Library/Application Support/reeve/
   config.toml · state.toml · generated/ · certs/ · logs/
-~/.reeve/run/            # sockets (kept space-free, short)
+# Linux
+~/.config/reeve/
+  config.toml · state.toml · generated/ · certs/ · logs/
+
+~/.reeve/run/            # sockets (kept space-free, short) — both platforms
 ```
 
 ## OpenLiteSpeed
@@ -272,6 +286,31 @@ OLS has no official macOS build, and the only community Homebrew tap fails to
 compile its (2022-deprecated) `admin_php` dependency against the current macOS
 SDK. The backend is wired in and will activate if a working OLS install appears,
 but it is **not usable on macOS today**. Use Caddy, Apache, or nginx.
+
+## Linux
+
+reeve runs on Linux (Ubuntu-first) against Homebrew on Linux (Linuxbrew), with
+the same CLI, TUI, and workflow as macOS. A few things work differently under
+the hood, and `reeve init` sets most of them up for you:
+
+- **Services are systemd user units** (`~/.config/systemd/user/reeve-*.service`)
+  instead of launchd agents. This needs a user session bus, so reeve does **not**
+  run inside bare containers or over a session-less login. `reeve doctor` checks
+  that `systemctl --user` responds.
+- **Login lingering** is enabled during `init` (`loginctl enable-linger`) so your
+  servers keep running after you log out and come back automatically on boot.
+- **Privileged ports.** Linux blocks non-root processes from binding ports below
+  1024. `init` offers to write `/etc/sysctl.d/99-reeve.conf`
+  (`net.ipv4.ip_unprivileged_port_start = 80`) with one `sudo` so servers can
+  bind :80/:443. Decline it and use ports ≥ 1024 instead.
+- **DNS** uses a systemd-resolved drop-in (`/etc/systemd/resolved.conf.d/reeve.conf`)
+  rather than `/etc/resolver`, applied via `sudo`. Hosts that don't run
+  systemd-resolved aren't supported for automatic DNS.
+- **SSL trust** installs the mkcert CA into the system store. For browser trust,
+  install `libnss3-tools` (apt) or `nss` (brew) so mkcert can add the CA to NSS
+  too.
+
+Not supported: distros without systemd (Alpine, WSL1) and container-only setups.
 
 ## Development
 

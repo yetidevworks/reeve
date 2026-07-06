@@ -96,16 +96,25 @@ pub fn run(brew: Option<&Brew>, cfg: &Config, state: &State) -> Vec<Check> {
         // port (checked even for disabled servers, to catch e.g. a stray
         // `brew services` httpd sitting on :80).
         let (health, detail) = match crate::ops::serve_state(s) {
-            ServeState::Serving => (
-                Health::Ok,
-                format!("running on :{}/:{}", s.http_port, s.https_port),
-            ),
+            ServeState::Serving => {
+                let ports = crate::ops::serving_ports(s);
+                let list = if ports.is_empty() {
+                    format!(":{}/:{}", s.http_port, s.https_port)
+                } else {
+                    ports
+                        .iter()
+                        .map(|p| format!(":{p}"))
+                        .collect::<Vec<_>>()
+                        .join("/")
+                };
+                (Health::Ok, format!("running on {list}"))
+            }
             ServeState::Stopped => (Health::Ok, "stopped".to_string()),
             ServeState::LoadedNotBound => (
                 Health::Fail,
                 format!(
-                    "loaded but not listening on :{} — empty config or failed bind (`reeve logs server-{}`)",
-                    s.http_port, s.name
+                    "loaded but not listening — empty config or failed bind (`reeve logs server-{}`)",
+                    s.name
                 ),
             ),
             ServeState::PortConflict { port, holder, pid } => (
@@ -224,7 +233,7 @@ pub fn run(brew: Option<&Brew>, cfg: &Config, state: &State) -> Vec<Check> {
             checks.push(Check::new(
                 format!("dns .{tld}"),
                 Health::Warn,
-                "no /etc/resolver entry — run `reeve dns setup`".to_string(),
+                "no system resolver entry — run `reeve dns setup`".to_string(),
             ));
         } else {
             checks.push(Check::new(
@@ -259,7 +268,73 @@ pub fn run(brew: Option<&Brew>, cfg: &Config, state: &State) -> Vec<Check> {
         )),
     }
 
+    #[cfg(target_os = "linux")]
+    linux_checks(&mut checks, state);
+
     checks
+}
+
+/// Linux-only host checks: user session bus reachability, login lingering (boot
+/// persistence), and the unprivileged-low-port sysctl when any enabled server
+/// is configured on a port below 1024.
+#[cfg(target_os = "linux")]
+fn linux_checks(checks: &mut Vec<Check>, state: &State) {
+    if daemon::user_bus_ok() {
+        checks.push(Check::new(
+            "systemd user bus",
+            Health::Ok,
+            "`systemctl --user` responding".to_string(),
+        ));
+    } else {
+        checks.push(Check::new(
+            "systemd user bus",
+            Health::Fail,
+            "`systemctl --user` not responding — no user session bus (needed to run services)"
+                .to_string(),
+        ));
+    }
+
+    if daemon::linger_enabled() {
+        checks.push(Check::new(
+            "login lingering",
+            Health::Ok,
+            "enabled — services persist across logout / reboot".to_string(),
+        ));
+    } else {
+        checks.push(Check::new(
+            "login lingering",
+            Health::Warn,
+            "off — services stop at logout; run `loginctl enable-linger` (reeve init offers this)"
+                .to_string(),
+        ));
+    }
+
+    let low_ports: Vec<u16> = state
+        .servers
+        .iter()
+        .filter(|s| s.enabled)
+        .flat_map(|s| [s.http_port, s.https_port])
+        .filter(|&p| p < 1024)
+        .collect();
+    if !low_ports.is_empty() && !privileged_ports_allowed() {
+        checks.push(Check::new(
+            "privileged ports",
+            Health::Fail,
+            "servers use ports < 1024 but unprivileged binding isn't allowed — \
+             `reeve init` offers the sysctl fix"
+                .to_string(),
+        ));
+    }
+}
+
+/// Current `net.ipv4.ip_unprivileged_port_start`; low enough to bind :80?
+#[cfg(target_os = "linux")]
+fn privileged_ports_allowed() -> bool {
+    std::fs::read_to_string("/proc/sys/net/ipv4/ip_unprivileged_port_start")
+        .ok()
+        .and_then(|s| s.trim().parse::<u16>().ok())
+        .map(|start| start <= 80)
+        .unwrap_or(false)
 }
 
 /// Duplicate http/https ports across enabled servers. Mirrors the guard in

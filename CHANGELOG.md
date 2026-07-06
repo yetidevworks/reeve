@@ -2,6 +2,30 @@
 
 All notable changes to reeve are documented here.
 
+## 0.3.0
+
+### Added
+- **Linux support.** reeve now runs on Linux (Ubuntu-first) against Homebrew on
+  Linux (Linuxbrew), with the same workflow as macOS: `init`, `php install`,
+  `server add`, `vhost add`, `apply`, `dns setup`, `ssl trust`, the TUI, and
+  `doctor` all work end-to-end. Managed services run as systemd **user** units
+  (`~/.config/systemd/user/reeve-*.service`) instead of launchd agents, selected
+  at compile time so macOS behavior is unchanged. `init` enables login lingering
+  (so services persist across logout and start at boot) and offers to allow
+  unprivileged binding to :80/:443 via a `sysctl` drop-in. DNS integrates with
+  systemd-resolved (a `resolved.conf.d` drop-in in place of `/etc/resolver`);
+  SSL trust verifies against the system CA store with `openssl verify`; and the
+  FPM pool runs under the user's real primary group rather than macOS's `staff`.
+  `doctor` gains Linux checks for the systemd user bus, login lingering, and the
+  privileged-port sysctl.
+
+### Fixed
+- `doctor` now judges a web server on the ports it actually binds (HTTP, HTTPS,
+  or both) instead of assuming HTTP. An HTTPS-only server (all-SSL vhosts, no
+  default site) is now reported as running on :443 rather than failing with
+  "not listening on :80". On Linux the listener probe uses `ss` (iproute2),
+  which is present on minimal installs where `lsof` is not.
+
 ## 0.2.8
 
 ### Added

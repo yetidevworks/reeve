@@ -57,42 +57,59 @@ impl ServeState {
     }
 }
 
-/// The TCP ports a server will actually bind: always HTTP, plus HTTPS when it
-/// serves a default site or any SSL vhost.
+/// The TCP ports a server actually binds: HTTP when it serves a default site or
+/// any plain vhost, HTTPS when it serves a default site or any SSL vhost. An
+/// all-SSL server binds only HTTPS; an all-plain server binds only HTTP; a
+/// server with nothing to serve binds neither.
 fn ports_to_bind(server: &Server, state: &crate::state::State) -> Vec<u16> {
-    let mut ports = vec![server.http_port];
-    let needs_https = server.default_site
-        || crate::park::effective_vhosts_for(state, &server.name)
-            .iter()
-            .any(|v| v.ssl);
-    if needs_https {
+    let vhosts = crate::park::effective_vhosts_for(state, &server.name);
+    let has_http = server.default_site || vhosts.iter().any(|v| !v.ssl);
+    let has_https = server.default_site || vhosts.iter().any(|v| v.ssl);
+    let mut ports = Vec::new();
+    if has_http {
+        ports.push(server.http_port);
+    }
+    if has_https {
         ports.push(server.https_port);
     }
     ports
 }
 
-/// Resolve a server's honest, port-aware state (see [`ServeState`]).
+/// Ports where the server's own job is currently listening (for status detail).
+pub fn serving_ports(server: &Server) -> Vec<u16> {
+    let our = daemon::pid(&server_service_id(server));
+    let state = load_state().unwrap_or_default();
+    ports_to_bind(server, &state)
+        .into_iter()
+        .filter(|&p| probe::classify_port(p, our) == PortState::OursBound)
+        .collect()
+}
+
+/// Resolve a server's honest, port-aware state (see [`ServeState`]). A server is
+/// [`ServeState::Serving`] when its own job is bound to at least one of the
+/// ports it should serve — so an HTTP-only or HTTPS-only server is judged on the
+/// port it actually binds, not on HTTP alone.
 pub fn serve_state(server: &Server) -> ServeState {
     let id = server_service_id(server);
     let our = daemon::pid(&id);
     let state = load_state().unwrap_or_default();
+    let ports = ports_to_bind(server, &state);
     // A foreign holder on any port we'd bind is a conflict, whether or not our
     // own job happens to be loaded.
-    if let Some((port, pid, holder)) = probe::first_foreign(&ports_to_bind(server, &state), our) {
+    if let Some((port, pid, holder)) = probe::first_foreign(&ports, our) {
         return ServeState::PortConflict { port, holder, pid };
     }
-    match probe::classify_port(server.http_port, our) {
-        PortState::OursBound => ServeState::Serving,
-        PortState::Foreign { pid, name } => ServeState::PortConflict {
-            port: server.http_port,
-            holder: name,
-            pid,
-        },
-        PortState::Free => match daemon::status(&id) {
-            Status::Running => ServeState::LoadedNotBound,
-            Status::Error => ServeState::Crashed,
-            Status::Stopped => ServeState::Stopped,
-        },
+    // Bound to any port it should serve → Serving.
+    if ports
+        .iter()
+        .any(|&p| probe::classify_port(p, our) == PortState::OursBound)
+    {
+        return ServeState::Serving;
+    }
+    match daemon::status(&id) {
+        Status::Running => ServeState::LoadedNotBound,
+        Status::Error => ServeState::Crashed,
+        Status::Stopped => ServeState::Stopped,
     }
 }
 
@@ -508,6 +525,59 @@ pub fn restart_server(name: &str) -> Result<Status> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::{Backend, State};
+
+    fn server(name: &str, default_site: bool) -> Server {
+        Server {
+            name: name.into(),
+            backend: Backend::Caddy,
+            http_port: 80,
+            https_port: 443,
+            enabled: true,
+            default_site,
+            default_preset: Default::default(),
+            default_root: None,
+            settings: Default::default(),
+        }
+    }
+
+    fn vhost(server: &str, ssl: bool) -> Vhost {
+        Vhost {
+            server_name: format!("{}-site.test", if ssl { "s" } else { "p" }),
+            server: server.into(),
+            docroot: "/tmp".into(),
+            php_version: "8.4".into(),
+            ssl,
+            preset: Default::default(),
+            proxy_target: None,
+        }
+    }
+
+    #[test]
+    fn ports_to_bind_follows_http_https_mix() {
+        let mut state = State::default();
+        let s = server("caddy", false);
+
+        // No vhosts, no default site → binds nothing.
+        assert_eq!(ports_to_bind(&s, &state), Vec::<u16>::new());
+
+        // Plain vhost only → HTTP only.
+        state.vhosts.push(vhost("caddy", false));
+        assert_eq!(ports_to_bind(&s, &state), vec![80]);
+
+        // Add an SSL vhost → both.
+        state.vhosts.push(vhost("caddy", true));
+        assert_eq!(ports_to_bind(&s, &state), vec![80, 443]);
+
+        // SSL vhost only → HTTPS only.
+        let mut https_only = State::default();
+        https_only.vhosts.push(vhost("caddy", true));
+        assert_eq!(ports_to_bind(&s, &https_only), vec![443]);
+
+        // Default site forces both regardless of vhosts.
+        let ds = server("caddy", true);
+        assert_eq!(ports_to_bind(&ds, &State::default()), vec![80, 443]);
+    }
 
     #[test]
     fn serve_state_labels() {

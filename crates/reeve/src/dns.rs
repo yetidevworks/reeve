@@ -1,6 +1,7 @@
 //! Local wildcard DNS for the dev TLD (default `.test`). A reeve-managed
-//! dnsmasq answers `*.<tld>` with 127.0.0.1 on 127.0.0.1:53, and macOS is
-//! pointed at it via `/etc/resolver/<tld>`.
+//! dnsmasq answers `*.<tld>` with 127.0.0.1 on `127.0.0.1:5335`, and the host
+//! resolver is pointed at it: `/etc/resolver/<tld>` on macOS, a
+//! systemd-resolved drop-in on Linux.
 
 use crate::brew::Brew;
 use crate::daemon::{self, ServiceSpec};
@@ -13,8 +14,9 @@ use std::process::Command;
 const SERVICE: &str = "dnsmasq";
 
 /// dnsmasq listens here. An unprivileged port so the daemon runs as the regular
-/// user (binding :53 needs root); macOS reaches it via the resolver `port`
-/// directive. 53 + 300 = a memorable, rarely-occupied choice.
+/// user (binding :53 needs root); the host resolver reaches it via this port.
+/// 53 + 300 = a memorable, rarely-occupied choice. On Linux it also avoids
+/// systemd-resolved's stub on 127.0.0.53:53.
 const DNS_PORT: u16 = 5335;
 
 /// Ensure dnsmasq is installed.
@@ -51,7 +53,7 @@ pub fn write_config(tlds: &[String]) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// launchd service spec running our dnsmasq with our config in the foreground.
+/// Service spec running our dnsmasq with our config in the foreground.
 pub fn service_spec(brew: &Brew) -> Result<ServiceSpec> {
     let conf = config_path()?;
     if !conf.exists() {
@@ -72,9 +74,37 @@ pub fn service_spec(brew: &Brew) -> Result<ServiceSpec> {
     })
 }
 
-/// launchd service id (for status queries).
+/// Service id (for status queries).
 pub fn service_id() -> &'static str {
     SERVICE
+}
+
+/// Full DNS setup: install dnsmasq, render its config, run it, and wire up the
+/// system resolver for every configured TLD (escalating for the one root step).
+/// Returns whether all TLDs now resolve.
+pub fn setup(brew: &Brew, tlds: &[String]) -> Result<bool> {
+    ensure_installed(brew)?;
+    write_config(tlds)?;
+    let spec = service_spec(brew)?;
+    daemon::install(&spec)?;
+    daemon::restart(SERVICE)?;
+    setup_resolver(tlds)?;
+    Ok(resolver_ok_all(tlds))
+}
+
+/// True when every configured TLD has a valid resolver entry.
+pub fn resolver_ok_all(tlds: &[String]) -> bool {
+    !tlds.is_empty() && tlds.iter().all(|t| resolver_ok(t))
+}
+
+// ===========================================================================
+// macOS resolver wiring: `/etc/resolver/<tld>` + mDNSResponder cache flush.
+// ===========================================================================
+
+/// Human-readable location of the resolver config for a TLD (for status copy).
+#[cfg(target_os = "macos")]
+pub fn resolver_location(tld: &str) -> String {
+    format!("/etc/resolver/{tld}")
 }
 
 /// Write `/etc/resolver/<tld>` so macOS routes that TLD to our dnsmasq, then
@@ -82,6 +112,7 @@ pub fn service_id() -> &'static str {
 /// directly we escalate via the native macOS admin-password dialog (osascript
 /// `with administrator privileges`) — no password ever touches our process,
 /// and it works from the TUI without disturbing the terminal.
+#[cfg(target_os = "macos")]
 pub fn setup_resolver(tlds: &[String]) -> Result<()> {
     let contents = format!("nameserver 127.0.0.1\nport {DNS_PORT}\n");
 
@@ -114,6 +145,7 @@ pub fn setup_resolver(tlds: &[String]) -> Result<()> {
 /// Run a shell script as root via the native macOS authentication dialog.
 /// Touch ID / password prompt is handled by the OS; nothing sensitive flows
 /// through us. Requires a GUI session (true on a logged-in Mac).
+#[cfg(target_os = "macos")]
 fn run_as_admin(shell_script: &str) -> Result<()> {
     // Escape for embedding inside an AppleScript double-quoted string: the
     // shell's literal `\n` must survive as `\\n` so AppleScript hands `\n` back.
@@ -134,12 +166,14 @@ fn run_as_admin(shell_script: &str) -> Result<()> {
 }
 
 /// Flush DNS when already privileged (best-effort, no escalation).
+#[cfg(target_os = "macos")]
 fn flush_dns_unprivileged() {
     let _ = Command::new("dscacheutil").arg("-flushcache").status();
 }
 
 /// True when the resolver file exists and points at our dnsmasq port — guards
 /// against a stale/typo'd file counting as "configured".
+#[cfg(target_os = "macos")]
 pub fn resolver_ok(tld: &str) -> bool {
     match fs::read_to_string(format!("/etc/resolver/{tld}")) {
         Ok(c) => c.contains("127.0.0.1") && c.contains(&format!("port {DNS_PORT}")),
@@ -147,25 +181,147 @@ pub fn resolver_ok(tld: &str) -> bool {
     }
 }
 
-/// Full DNS setup: install dnsmasq, render its config, run it, and wire up the
-/// system resolver for every configured TLD (escalating for the one root step).
-/// Returns whether all TLDs now resolve.
-pub fn setup(brew: &Brew, tlds: &[String]) -> Result<bool> {
-    ensure_installed(brew)?;
-    write_config(tlds)?;
-    let spec = service_spec(brew)?;
-    daemon::install(&spec)?;
-    daemon::restart(SERVICE)?;
-    setup_resolver(tlds)?;
-    Ok(resolver_ok_all(tlds))
-}
-
-/// True when every configured TLD has a valid resolver file.
-pub fn resolver_ok_all(tlds: &[String]) -> bool {
-    !tlds.is_empty() && tlds.iter().all(|t| resolver_ok(t))
-}
-
 /// Is the resolver file already in place for a TLD?
+#[cfg(target_os = "macos")]
 pub fn resolver_ready(tld: &str) -> bool {
     PathBuf::from(format!("/etc/resolver/{tld}")).exists()
+}
+
+// ===========================================================================
+// Linux resolver wiring: systemd-resolved drop-in + resolvectl cache flush.
+// ===========================================================================
+
+/// The systemd-resolved drop-in reeve owns.
+#[cfg(target_os = "linux")]
+const RESOLVED_DROPIN: &str = "/etc/systemd/resolved.conf.d/reeve.conf";
+
+/// Human-readable location of the resolver config (for status copy). All TLDs
+/// share the one drop-in on Linux.
+#[cfg(target_os = "linux")]
+pub fn resolver_location(_tld: &str) -> String {
+    RESOLVED_DROPIN.to_string()
+}
+
+/// The drop-in body: route every configured TLD to our dnsmasq. `DNS=` with a
+/// port needs systemd >= 246 (Ubuntu 24.04 has 255); each `~<tld>` is a
+/// routing-only domain so only those TLDs go to us.
+#[cfg(target_os = "linux")]
+fn resolved_dropin(tlds: &[String]) -> String {
+    let domains = tlds
+        .iter()
+        .map(|t| format!("~{t}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "# Generated by reeve — do not edit by hand.\n\
+         [Resolve]\n\
+         DNS=127.0.0.1:{DNS_PORT}\n\
+         Domains={domains}\n"
+    )
+}
+
+/// Write the systemd-resolved drop-in and restart systemd-resolved so the host
+/// routes `*.<tld>` to our dnsmasq. The drop-in path is root-owned; when we
+/// can't write it directly we escalate via `sudo`, else print the commands for
+/// manual execution — the same three-tier philosophy as the macOS path.
+#[cfg(target_os = "linux")]
+pub fn setup_resolver(tlds: &[String]) -> Result<()> {
+    // reeve's DNS integration drives systemd-resolved. If it's masked/absent
+    // (some environments — e.g. OrbStack — own DNS themselves), bail with an
+    // actionable message instead of a cryptic sudo failure.
+    if !resolved_available() {
+        bail!(
+            "systemd-resolved is not available on this host, so reeve can't wire up \
+             `.{tld}` resolution automatically. Point your resolver at 127.0.0.1:{port} \
+             manually, or add hosts entries. (Environments like OrbStack manage DNS \
+             themselves.)",
+            tld = tlds.first().map(String::as_str).unwrap_or("test"),
+            port = DNS_PORT,
+        );
+    }
+
+    let contents = resolved_dropin(tlds);
+    let dir = std::path::Path::new(RESOLVED_DROPIN).parent().unwrap();
+
+    // Fast path: already root / writable.
+    if fs::create_dir_all(dir).is_ok() && fs::write(RESOLVED_DROPIN, &contents).is_ok() {
+        let _ = Command::new("systemctl")
+            .args(["restart", "systemd-resolved"])
+            .status();
+        flush_dns_unprivileged();
+        return Ok(());
+    }
+
+    // Escalate the whole sequence as one sudo action. The write is gated by
+    // `&&`; the restart/flush are best-effort (`|| true`) so a transient restart
+    // hiccup doesn't report the whole thing as failed when the file did land.
+    let printf_body = contents.replace('\\', "\\\\").replace('\'', "'\\''");
+    let script = format!(
+        "mkdir -p {dir} && printf '%s' '{printf_body}' > {file} && \
+         {{ systemctl restart systemd-resolved || true; }} && \
+         {{ resolvectl flush-caches || true; }}",
+        dir = dir.display(),
+        file = RESOLVED_DROPIN,
+    );
+    run_as_admin(&script).context("Could not write the systemd-resolved drop-in (sudo was needed)")
+}
+
+/// Is systemd-resolved usable (present and not masked)? `is-enabled` prints
+/// `masked` for a masked unit and errors for an unknown one.
+#[cfg(target_os = "linux")]
+fn resolved_available() -> bool {
+    match Command::new("systemctl")
+        .args(["is-enabled", "systemd-resolved"])
+        .output()
+    {
+        Ok(o) => {
+            let state = String::from_utf8_lossy(&o.stdout);
+            let state = state.trim();
+            // enabled / disabled / static / alias all mean the unit exists and
+            // can be started; only masked (or an error → empty) rules it out.
+            !state.is_empty() && state != "masked"
+        }
+        Err(_) => false,
+    }
+}
+
+/// Run a shell script as root via `sudo`. On the CLI sudo prompts on the
+/// terminal; passwordless sudoers run non-interactively. stdio is inherited so
+/// the password prompt is visible.
+#[cfg(target_os = "linux")]
+fn run_as_admin(shell_script: &str) -> Result<()> {
+    let status = Command::new("sudo")
+        .arg("bash")
+        .arg("-c")
+        .arg(shell_script)
+        .status()
+        .context("Failed to run sudo for admin escalation")?;
+    if !status.success() {
+        bail!(
+            "admin authorization failed. Run this manually:\n  sudo bash -c '{}'",
+            shell_script
+        );
+    }
+    Ok(())
+}
+
+/// Flush the resolver cache when already privileged (best-effort).
+#[cfg(target_os = "linux")]
+fn flush_dns_unprivileged() {
+    let _ = Command::new("resolvectl").arg("flush-caches").status();
+}
+
+/// True when the drop-in exists, targets our dnsmasq port, and routes this TLD.
+#[cfg(target_os = "linux")]
+pub fn resolver_ok(tld: &str) -> bool {
+    match fs::read_to_string(RESOLVED_DROPIN) {
+        Ok(c) => c.contains(&format!("127.0.0.1:{DNS_PORT}")) && c.contains(&format!("~{tld}")),
+        Err(_) => false,
+    }
+}
+
+/// Is the drop-in already in place for a TLD?
+#[cfg(target_os = "linux")]
+pub fn resolver_ready(tld: &str) -> bool {
+    resolver_ok(tld)
 }

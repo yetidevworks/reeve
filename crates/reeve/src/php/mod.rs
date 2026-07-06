@@ -65,6 +65,26 @@ fn current_user() -> String {
         })
 }
 
+/// The FPM pool group. macOS keeps `staff` (its admin users' primary group,
+/// unchanged from the original behavior); other platforms use the current
+/// user's real primary group. FPM ignores user/group unless it runs as root
+/// (reeve never does), so this is cosmetic, but `staff` is wrong off macOS.
+fn fpm_group() -> String {
+    if cfg!(target_os = "macos") {
+        "staff".to_string()
+    } else {
+        Command::new("id")
+            .arg("-gn")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(current_user)
+    }
+}
+
 /// Where a php.ini key lands in the generated FPM pool: a raw pool directive
 /// (`pm.max_children`), a `php_admin_value[...]`, or a `php_admin_flag[...]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,6 +246,7 @@ fn build_fpm_conf(php: &PhpVersion) -> Result<String> {
     let c = compact(version);
     let socket = fpm_socket(version)?;
     let user = current_user();
+    let group = fpm_group();
     let run = paths::run_dir()?;
     let logs = paths::logs_dir()?;
 
@@ -240,16 +261,17 @@ fn build_fpm_conf(php: &PhpVersion) -> Result<String> {
          \n\
          [www]\n\
          user = {user}\n\
-         group = staff\n\
+         group = {group}\n\
          listen = {socket}\n\
          listen.owner = {user}\n\
-         listen.group = staff\n\
+         listen.group = {group}\n\
          listen.mode = 0660\n",
         version = version,
         c = c,
         run = run.display(),
         logs = logs.display(),
         user = user,
+        group = group,
         socket = socket.display(),
     );
 

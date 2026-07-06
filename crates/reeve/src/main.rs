@@ -88,9 +88,9 @@ fn cmd_dns(c: DnsCommands) -> Result<()> {
                 daemon::status(dns::service_id()).as_str()
             );
             if ok {
-                println!("✓ /etc/resolver configured — {list} resolve system-wide");
+                println!("✓ system resolver configured — {list} resolve system-wide");
             } else {
-                println!("⚠ one or more /etc/resolver files not configured");
+                println!("⚠ system resolver not fully configured");
             }
             Ok(())
         }
@@ -101,7 +101,8 @@ fn cmd_dns(c: DnsCommands) -> Result<()> {
             );
             for tld in &tlds {
                 println!(
-                    "/etc/resolver/{tld} : {}",
+                    "{} : {}",
+                    dns::resolver_location(tld),
                     if dns::resolver_ready(tld) {
                         "present"
                     } else {
@@ -204,11 +205,91 @@ fn cmd_init() -> Result<()> {
     // one-time setup is handled up front instead of surfacing later.
     offer_shim_path_setup(&brew)?;
 
+    // Linux one-time host setup: login lingering + privileged-port allowance.
+    #[cfg(target_os = "linux")]
+    linux_post_init()?;
+
     println!();
     println!("Next steps:");
     println!("  reeve php install 8.3       # install a PHP version + FPM master");
     println!("  reeve server add caddy      # add a web server");
     println!("  reeve vhost add app.test --root ~/Sites/app --php 8.3 --server caddy");
+    Ok(())
+}
+
+/// Linux-only host setup run at the end of `init`: enable systemd login
+/// lingering (so user units survive logout and start at boot), warn if the user
+/// session bus is missing, and offer to allow unprivileged binding to :80/:443.
+#[cfg(target_os = "linux")]
+fn linux_post_init() -> Result<()> {
+    println!();
+    if daemon::linger_enabled() {
+        println!("✓ systemd login lingering already enabled");
+    } else {
+        match daemon::enable_linger() {
+            Ok(()) => println!(
+                "✓ Enabled systemd login lingering — services persist across logout and start at boot"
+            ),
+            Err(e) => println!("⚠ {e}"),
+        }
+    }
+    if !daemon::user_bus_ok() {
+        println!(
+            "⚠ `systemctl --user` is not responding — reeve needs a user session bus \
+             (unavailable in bare containers)."
+        );
+    }
+    offer_privileged_ports_setup()?;
+    Ok(())
+}
+
+/// The sysctl drop-in that lets unprivileged processes bind low ports.
+#[cfg(target_os = "linux")]
+const SYSCTL_FILE: &str = "/etc/sysctl.d/99-reeve.conf";
+
+/// Current `net.ipv4.ip_unprivileged_port_start`; low enough to bind :80?
+#[cfg(target_os = "linux")]
+fn privileged_ports_allowed() -> bool {
+    std::fs::read_to_string("/proc/sys/net/ipv4/ip_unprivileged_port_start")
+        .ok()
+        .and_then(|s| s.trim().parse::<u16>().ok())
+        .map(|start| start <= 80)
+        .unwrap_or(false)
+}
+
+/// Offer to write the sysctl drop-in so user-level servers can bind :80/:443.
+/// One sudo, survives reboots, no per-binary setcap that brew upgrades break.
+#[cfg(target_os = "linux")]
+fn offer_privileged_ports_setup() -> Result<()> {
+    if privileged_ports_allowed() {
+        println!("✓ Unprivileged binding to :80/:443 already allowed");
+        return Ok(());
+    }
+    println!();
+    println!("Linux blocks non-root processes from binding ports below 1024, but reeve's");
+    println!("default servers use :80/:443. Allowing low ports takes one sudo:");
+    println!("  {SYSCTL_FILE}: net.ipv4.ip_unprivileged_port_start = 80");
+    if !brew::confirm("Write it now (via sudo)?")? {
+        println!("• Skipped — configure servers on ports >= 1024, or run later:");
+        println!(
+            "    echo 'net.ipv4.ip_unprivileged_port_start = 80' | sudo tee {SYSCTL_FILE} && sudo sysctl --system"
+        );
+        return Ok(());
+    }
+    let script = format!(
+        "printf 'net.ipv4.ip_unprivileged_port_start = 80\\n' > {SYSCTL_FILE} && sysctl --system"
+    );
+    let status = std::process::Command::new("sudo")
+        .arg("bash")
+        .arg("-c")
+        .arg(&script)
+        .status()
+        .context("Failed to run sudo for sysctl setup")?;
+    if status.success() {
+        println!("✓ Wrote {SYSCTL_FILE} — servers can now bind :80/:443");
+    } else {
+        println!("⚠ sudo did not complete — servers will need ports >= 1024 until this is set");
+    }
     Ok(())
 }
 
@@ -803,7 +884,7 @@ fn cmd_ssl(c: SslCommands) -> Result<()> {
                     "✓ mkcert local CA installed into the trust store — local HTTPS is now trusted"
                 );
             } else {
-                println!("✓ mkcert local CA was already trusted (System keychain + Firefox)");
+                println!("✓ mkcert local CA was already trusted — local HTTPS works");
             }
             Ok(())
         }

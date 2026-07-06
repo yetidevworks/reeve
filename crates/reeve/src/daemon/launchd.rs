@@ -2,9 +2,10 @@
 //! as user LaunchAgents under `~/Library/LaunchAgents/com.reeve.*.plist`.
 //! Generic over the service label so one implementation serves every daemon.
 
+use super::{ServiceSpec, Status};
 use anyhow::{bail, Context, Result};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 const LABEL_PREFIX: &str = "com.reeve";
@@ -12,39 +13,6 @@ const LABEL_PREFIX: &str = "com.reeve";
 /// Reverse-DNS label for a managed service, e.g. `com.reeve.php-83`.
 pub fn label(service: &str) -> String {
     format!("{LABEL_PREFIX}.{service}")
-}
-
-/// Declarative description of a launchd-managed process.
-pub struct ServiceSpec {
-    /// Short service id (without prefix), e.g. `php-83` or `server-caddy`.
-    pub service: String,
-    /// Absolute path to the program to run.
-    pub program: PathBuf,
-    /// Program arguments (the program itself is prepended automatically).
-    pub args: Vec<String>,
-    /// Combined stdout/stderr log path.
-    pub log: PathBuf,
-    /// Restart on unexpected exit.
-    pub keep_alive: bool,
-    /// Start as soon as the agent is loaded.
-    pub run_at_load: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Status {
-    Running,
-    Stopped,
-    Error,
-}
-
-impl Status {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Status::Running => "running",
-            Status::Stopped => "stopped",
-            Status::Error => "error",
-        }
-    }
 }
 
 fn launch_agents_dir() -> Result<PathBuf> {
@@ -276,12 +244,4 @@ pub fn pid(service: &str) -> Option<u32> {
         }
     }
     None
-}
-
-/// True if a unix socket path exists and is a socket (cheap FPM health check).
-pub fn socket_alive(path: &Path) -> bool {
-    use std::os::unix::fs::FileTypeExt;
-    fs::metadata(path)
-        .map(|m| m.file_type().is_socket())
-        .unwrap_or(false)
 }

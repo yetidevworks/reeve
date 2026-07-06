@@ -12,6 +12,21 @@ fn mkcert_bin(brew: &Brew) -> PathBuf {
     brew.bin("mkcert")
 }
 
+/// Platform-specific tail for the `mkcert -install` failure hint. On Linux the
+/// CA copy into `/usr/local/share/ca-certificates` needs root, and browser
+/// (NSS) trust needs `certutil` from `libnss3-tools`.
+fn trust_hint() -> &'static str {
+    #[cfg(target_os = "linux")]
+    {
+        " On Linux, run `sudo mkcert -install`; install `libnss3-tools` (apt) \
+          or `nss` (brew) first so Chromium/Firefox trust it too."
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        ""
+    }
+}
+
 /// Ensure the mkcert formula is installed.
 pub fn ensure_installed(brew: &Brew) -> Result<()> {
     if !brew.is_installed("mkcert") {
@@ -56,8 +71,9 @@ pub fn ensure_ca(brew: &Brew) -> Result<bool> {
     if !out.status.success() {
         bail!(
             "`mkcert -install` failed: {}. You may need to authorize adding the \
-             CA to your trust store, then re-run.",
-            String::from_utf8_lossy(&out.stderr).trim()
+             CA to your trust store, then re-run.{}",
+            String::from_utf8_lossy(&out.stderr).trim(),
+            trust_hint()
         );
     }
     let combined = format!(
@@ -87,6 +103,7 @@ pub fn uninstall_ca(brew: &Brew) -> Result<()> {
 
 /// Whether the mkcert root CA is actually present in the macOS System keychain
 /// (not merely generated on disk) — the real "is local HTTPS trusted" check.
+#[cfg(target_os = "macos")]
 pub fn is_trusted(brew: &Brew) -> bool {
     // mkcert's CA common name is "mkcert <user>@<host> …"; find it by the
     // stable "mkcert" prefix in the System keychain.
@@ -98,6 +115,27 @@ pub fn is_trusted(brew: &Brew) -> bool {
             "mkcert",
             "/Library/Keychains/System.keychain",
         ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Whether the mkcert root CA is actually installed into the Linux system trust
+/// store. `openssl verify -CApath /etc/ssl/certs` exits 0 only when the CA chain
+/// verifies against the installed bundle, so it tests real trust (not just that
+/// the CA was generated on disk).
+#[cfg(target_os = "linux")]
+pub fn is_trusted(brew: &Brew) -> bool {
+    let Ok(root) = ca_cert(brew) else {
+        return false;
+    };
+    if !root.exists() {
+        return false;
+    }
+    Command::new("openssl")
+        .arg("verify")
+        .args(["-CApath", "/etc/ssl/certs"])
+        .arg(&root)
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
