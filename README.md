@@ -170,11 +170,11 @@ reeve
 │   nginx    nginx   :9090/:9443  ○ stopped             │
 ├ Vhosts ───────────────────────────────────────────────┤
 │   https://app.test   caddy   8.3   ~/Sites/app        │
-├ Parked (37)  [1–4 of 37] ──────────────────────────────┤
-│ › https://blog.test  caddy   8.3   ~/Sites/blog        │
-│   https://shop.test  caddy   8.3   ~/Sites/shop        │
+├ Parked (37)  [1–4 of 37] ─────────────────────────────┤
+│ › https://blog.test  caddy   8.3   ~/Sites/blog       │
+│   https://shop.test  caddy   8.3   ~/Sites/shop       │
 ├ PHP ──────────────────────────────────────────────────┤
-│ 8.3★ ● running 🐛debug    8.4 ● running               │
+│ 8.3★ ● running  debug    8.4 ● running                │
 ├ Services ─────────────────────────────────────────────┤
 │ › mysql      :3306   ● running                        │
 │   mailpit    :8025   ● running                        │
