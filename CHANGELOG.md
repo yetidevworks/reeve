@@ -2,6 +2,22 @@
 
 All notable changes to reeve are documented here.
 
+## 0.3.2
+
+### Fixed
+- **DNS setup no longer fails silently without a GUI session.** `reeve dns setup`
+  (and the TUI's `D`) escalates to write the root-owned system resolver. On
+  macOS it used only the native admin dialog (osascript `with administrator
+  privileges`), which can't be drawn over SSH or from a headless context — so it
+  failed with "admin authorization was cancelled or failed" without ever
+  prompting. reeve now detects whether a GUI session can host that dialog (a real
+  user at `/dev/console`, not a remote shell) and, when it can't, falls back to
+  an interactive terminal `sudo`. In the TUI the dashboard suspends around the
+  prompt so the password entry is visible, then resumes — the same treatment the
+  other privileged operations already use. Linux always takes the interactive
+  path, which also fixes the prompt being swallowed by the TUI's alternate
+  screen. Neither path lets a password flow through reeve's own process.
+
 ## 0.3.1
 
 ### Fixed

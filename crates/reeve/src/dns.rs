@@ -107,11 +107,42 @@ pub fn resolver_location(tld: &str) -> String {
     format!("/etc/resolver/{tld}")
 }
 
+/// Can we escalate through the native macOS admin dialog? That dialog needs a
+/// logged-in GUI (Aqua) session; over SSH or from a headless context osascript
+/// can't draw it and fails without ever prompting. When this is false the
+/// caller must fall back to an interactive terminal `sudo` (which, in the TUI,
+/// means suspending the dashboard first so the prompt is visible).
+#[cfg(target_os = "macos")]
+pub fn gui_escalation_available() -> bool {
+    // A remote shell can't host the dialog even if someone is at the console.
+    if std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some() {
+        return false;
+    }
+    // The owner of `/dev/console` is whoever is logged into the GUI right now;
+    // at the login window (no session) it's `root`, and headless it's empty.
+    // A real user there means there's an Aqua session to host the auth dialog.
+    // This reflects the user's session, not our own bootstrap namespace — so it
+    // stays correct even when reeve is spawned from a non-Aqua context.
+    match Command::new("stat")
+        .args(["-f", "%Su", "/dev/console"])
+        .output()
+    {
+        Ok(o) => {
+            let owner = String::from_utf8_lossy(&o.stdout);
+            let owner = owner.trim();
+            !owner.is_empty() && owner != "root"
+        }
+        Err(_) => false,
+    }
+}
+
 /// Write `/etc/resolver/<tld>` so macOS routes that TLD to our dnsmasq, then
 /// flush the DNS cache. `/etc/resolver` is root-owned; when we can't write it
-/// directly we escalate via the native macOS admin-password dialog (osascript
-/// `with administrator privileges`) — no password ever touches our process,
-/// and it works from the TUI without disturbing the terminal.
+/// directly we escalate — via the native macOS admin dialog (osascript
+/// `with administrator privileges`) when a GUI session can host it, otherwise
+/// via an interactive terminal `sudo`. Neither path lets a password touch our
+/// process; the dialog floats over the TUI, and the sudo prompt relies on the
+/// caller having freed the terminal (see [`gui_escalation_available`]).
 #[cfg(target_os = "macos")]
 pub fn setup_resolver(tlds: &[String]) -> Result<()> {
     let contents = format!("nameserver 127.0.0.1\nport {DNS_PORT}\n");
@@ -142,11 +173,23 @@ pub fn setup_resolver(tlds: &[String]) -> Result<()> {
     })
 }
 
-/// Run a shell script as root via the native macOS authentication dialog.
-/// Touch ID / password prompt is handled by the OS; nothing sensitive flows
-/// through us. Requires a GUI session (true on a logged-in Mac).
+/// Run a shell script as root. On a GUI session we use the native macOS
+/// authentication dialog; otherwise (SSH / headless) we fall back to an
+/// interactive terminal `sudo`. Either way nothing sensitive flows through us —
+/// the password is entered into the OS dialog or straight into sudo.
 #[cfg(target_os = "macos")]
 fn run_as_admin(shell_script: &str) -> Result<()> {
+    if gui_escalation_available() {
+        run_as_admin_gui(shell_script)
+    } else {
+        run_as_admin_sudo(shell_script)
+    }
+}
+
+/// Escalate via the native macOS admin dialog (Touch ID / password). Works from
+/// the TUI without disturbing the terminal — the dialog floats over it.
+#[cfg(target_os = "macos")]
+fn run_as_admin_gui(shell_script: &str) -> Result<()> {
     // Escape for embedding inside an AppleScript double-quoted string: the
     // shell's literal `\n` must survive as `\\n` so AppleScript hands `\n` back.
     let escaped = shell_script.replace('\\', "\\\\").replace('"', "\\\"");
@@ -160,6 +203,24 @@ fn run_as_admin(shell_script: &str) -> Result<()> {
         .output()
         .context("Failed to run osascript for admin escalation")?;
     if !out.status.success() {
+        bail!("admin authorization was cancelled or failed");
+    }
+    Ok(())
+}
+
+/// Escalate via an interactive terminal `sudo` — the no-GUI fallback. stdio is
+/// inherited so the password prompt is visible; the caller is responsible for
+/// having freed the terminal first (in the TUI that means suspending the
+/// dashboard). Passwordless sudoers run non-interactively.
+#[cfg(target_os = "macos")]
+fn run_as_admin_sudo(shell_script: &str) -> Result<()> {
+    let status = Command::new("sudo")
+        .arg("bash")
+        .arg("-c")
+        .arg(shell_script)
+        .status()
+        .context("Failed to run sudo for admin escalation")?;
+    if !status.success() {
         bail!("admin authorization was cancelled or failed");
     }
     Ok(())
@@ -218,6 +279,14 @@ fn resolved_dropin(tlds: &[String]) -> String {
          DNS=127.0.0.1:{DNS_PORT}\n\
          Domains={domains}\n"
     )
+}
+
+/// Linux always escalates through an interactive terminal `sudo` — there is no
+/// native GUI admin dialog. The TUI uses this to decide it must suspend the
+/// dashboard so the sudo prompt is visible.
+#[cfg(target_os = "linux")]
+pub fn gui_escalation_available() -> bool {
+    false
 }
 
 /// Write the systemd-resolved drop-in and restart systemd-resolved so the host

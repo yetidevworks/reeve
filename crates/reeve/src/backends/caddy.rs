@@ -81,9 +81,7 @@ impl Caddy {
                     "http://{}:{} {{\n",
                     v.server_name, server.http_port
                 ));
-                out.push_str(&format!(
-                    "\tredir https://{authority}{{uri}} permanent\n"
-                ));
+                out.push_str(&format!("\tredir https://{authority}{{uri}} permanent\n"));
                 out.push_str("}\n\n");
             }
         }
@@ -337,7 +335,7 @@ mod tests {
             proxy_target: None,
         };
         let cfg = Config::default();
-        let out = Caddy::render_caddyfile(&server(), &vec![&plain], &state, &cfg).unwrap();
+        let out = Caddy::render_caddyfile(&server(), &[&plain], &state, &cfg).unwrap();
         assert!(!out.contains("redir "));
     }
 }

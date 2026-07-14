@@ -135,6 +135,10 @@ pub struct App {
     pub pending_service: Option<crate::state::ServiceKind>,
     /// A queued server start whose backend needs a (slow) brew install.
     pub pending_server: Option<String>,
+    /// A queued DNS setup. When escalation needs an interactive terminal `sudo`
+    /// (no GUI admin dialog — e.g. over SSH, or on Linux), run_loop suspends the
+    /// dashboard so the password prompt is visible, then resumes.
+    pub pending_dns: bool,
     /// Log-viewer modal (read-only tail of a service log), when open.
     pub log_modal: Option<LogModal>,
     /// Full doctor report modal, when open.
@@ -377,6 +381,7 @@ impl App {
             park_modal: None,
             pending_service: None,
             pending_server: None,
+            pending_dns: false,
             log_modal: None,
             doctor_modal: None,
             health: Health::Ok,
@@ -764,6 +769,14 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) ->
             run_server_start_suspended(terminal, app, &name)?;
         }
 
+        // DNS setup escalates for the root resolver write. With a GUI admin
+        // dialog it runs in place (the dialog floats over the dashboard);
+        // without one it needs the terminal for an interactive sudo prompt, so
+        // it runs suspended.
+        if std::mem::take(&mut app.pending_dns) {
+            run_dns_setup(terminal, app)?;
+        }
+
         if app.should_quit {
             return Ok(());
         }
@@ -1022,25 +1035,11 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             Panel::Parked | Panel::Services => {}
         },
         KeyCode::Char('D') => {
-            let tlds = app.config.local_tlds.clone();
-            let list = tlds
-                .iter()
-                .map(|t| format!("*.{t}"))
-                .collect::<Vec<_>>()
-                .join(", ");
+            // Queue it: run_loop runs DNS setup after this key is handled, so it
+            // can suspend the dashboard first when escalation needs an
+            // interactive terminal `sudo` (no GUI admin dialog available).
             app.message = "requesting admin access for DNS setup…".into();
-            let r = Brew::detect()
-                .and_then(|brew| crate::dns::setup(&brew, &tlds))
-                .map(|ok| {
-                    if ok {
-                        format!("{list} now resolve system-wide")
-                    } else {
-                        "dnsmasq running but the system resolver isn't fully set".to_string()
-                    }
-                });
-            app.act("dns setup", r);
-            // The admin dialog can disturb the terminal — force a clean repaint.
-            app.force_clear = true;
+            app.pending_dns = true;
         }
         _ => {}
     }
@@ -2515,6 +2514,66 @@ fn run_server_start_suspended(
         Err(e) => format!("✗ {name}: {e}"),
     };
     app.refresh();
+    Ok(())
+}
+
+/// Run DNS setup, escalating for the root resolver write. With a native GUI
+/// admin dialog available it runs in place — the dialog floats over the
+/// dashboard. Without one (over SSH, or on Linux) escalation is an interactive
+/// terminal `sudo`, so we suspend the dashboard the same way the other
+/// privileged ops do, letting the password prompt show, then resume.
+fn run_dns_setup(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Result<()> {
+    let tlds = app.config.local_tlds.clone();
+    let list = tlds
+        .iter()
+        .map(|t| format!("*.{t}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let run = || {
+        Brew::detect()
+            .and_then(|brew| crate::dns::setup(&brew, &tlds))
+            .map(|ok| {
+                if ok {
+                    format!("{list} now resolve system-wide")
+                } else {
+                    "dnsmasq running but the system resolver isn't fully set".to_string()
+                }
+            })
+    };
+
+    // GUI dialog path: the auth prompt floats over the alternate screen, so no
+    // need to leave it — just force a clean repaint afterward.
+    if crate::dns::gui_escalation_available() {
+        let r = run();
+        app.act("dns setup", r);
+        app.force_clear = true;
+        return Ok(());
+    }
+
+    // No GUI dialog: suspend so the interactive sudo password prompt is visible.
+    restore_terminal(terminal)?;
+    println!("\n── Setting up DNS for {list} ──");
+    println!(
+        "Admin access is needed to write the system resolver — enter your password if prompted.\n"
+    );
+    let result = run();
+    match &result {
+        Ok(msg) => println!("\n✓ {msg}. Press any key to return…"),
+        Err(e) => println!("\n✗ {e}\nPress any key to return…"),
+    }
+    let _ = enable_raw_mode();
+    loop {
+        if event::poll(Duration::from_millis(500))? {
+            if let Event::Key(k) = event::read()? {
+                if k.kind == KeyEventKind::Press {
+                    break;
+                }
+            }
+        }
+    }
+    let _ = disable_raw_mode();
+    *terminal = setup_terminal()?;
+    app.act("dns setup", result);
     Ok(())
 }
 
