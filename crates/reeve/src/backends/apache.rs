@@ -238,6 +238,32 @@ impl Apache {
             ));
             out.push_str("</VirtualHost>\n\n");
         }
+
+        // Companion HTTP vhosts that redirect --ssl sites to HTTPS. Without
+        // them a plain http://host request matches no named port-80 vhost: it
+        // falls through to the default site (serving the wrong docroot) or, if
+        // no default site is configured, to the global `Require all denied`
+        // (a confusing 403). Emitted AFTER the default-site block so that block
+        // stays the first — and therefore default — port-80 vhost for genuinely
+        // unmatched hosts; a named request for `host` still matches its own
+        // redirect vhost regardless of order.
+        for v in vhosts {
+            if !v.ssl {
+                continue;
+            }
+            let authority = super::https_authority(&v.server_name, server.https_port);
+            out.push_str(&format!("<VirtualHost *:{}>\n", server.http_port));
+            out.push_str(&format!("    ServerName {}\n", v.server_name));
+            // mod_rewrite (already loaded above) rather than mod_alias's
+            // `Redirect`, which isn't in the base module set. %{REQUEST_URI}
+            // carries the path; the original query string is re-appended
+            // automatically by the [R] flag.
+            out.push_str("    RewriteEngine On\n");
+            out.push_str(&format!(
+                "    RewriteRule ^ https://{authority}%{{REQUEST_URI}} [R=301,L]\n"
+            ));
+            out.push_str("</VirtualHost>\n\n");
+        }
         Ok(out)
     }
 }
@@ -325,5 +351,107 @@ impl WebServerBackend for Apache {
             keep_alive: true,
             run_at_load: true,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{Framework, PhpVersion};
+
+    fn server() -> Server {
+        Server {
+            name: "apache".into(),
+            backend: Backend::Apache,
+            http_port: 80,
+            https_port: 443,
+            enabled: true,
+            default_site: false,
+            default_preset: Framework::Generic,
+            default_root: None,
+            settings: Default::default(),
+        }
+    }
+
+    fn state_with_php() -> State {
+        let mut state = State::default();
+        state.php_versions.push(PhpVersion {
+            version: "8.3".into(),
+            fpm_socket: "/run/php83.sock".into(),
+            ..Default::default()
+        });
+        state
+    }
+
+    fn ssl_vhost() -> Vhost {
+        Vhost {
+            server_name: "app.test".into(),
+            server: "apache".into(),
+            docroot: "/Sites/app".into(),
+            php_version: "8.3".into(),
+            ssl: true,
+            preset: Framework::Generic,
+            proxy_target: None,
+        }
+    }
+
+    #[test]
+    fn ssl_vhost_gets_http_redirect_vhost() {
+        let brew = Brew {
+            prefix: "/opt/homebrew".into(),
+        };
+        let state = state_with_php();
+        let cfg = Config::default();
+        let v = ssl_vhost();
+
+        // Standard 443 → redirect target has no port.
+        let out = Apache::render_conf(&server(), &[&v], &state, &cfg, &brew).unwrap();
+        assert!(out.contains("<VirtualHost *:443>"));
+        assert!(out.contains("<VirtualHost *:80>"));
+        assert!(out.contains("RewriteRule ^ https://app.test%{REQUEST_URI} [R=301,L]"));
+
+        // Non-standard HTTPS port → redirect target carries the port.
+        let mut alt = server();
+        alt.http_port = 8080;
+        alt.https_port = 8443;
+        let out = Apache::render_conf(&alt, &[&v], &state, &cfg, &brew).unwrap();
+        assert!(out.contains("<VirtualHost *:8080>"));
+        assert!(out.contains("RewriteRule ^ https://app.test:8443%{REQUEST_URI} [R=301,L]"));
+    }
+
+    #[test]
+    fn non_ssl_vhost_has_no_redirect() {
+        let brew = Brew {
+            prefix: "/opt/homebrew".into(),
+        };
+        let state = state_with_php();
+        let cfg = Config::default();
+        let mut v = ssl_vhost();
+        v.ssl = false;
+        let out = Apache::render_conf(&server(), &[&v], &state, &cfg, &brew).unwrap();
+        assert!(!out.contains("RewriteRule ^ https://"));
+    }
+
+    #[test]
+    fn default_site_stays_first_port80_vhost_before_redirects() {
+        // Apache uses the first VirtualHost on a port as the default for
+        // unmatched hosts, so the default-site catch-all must precede the
+        // per-vhost redirects — otherwise a redirect steals the catch-all.
+        let brew = Brew {
+            prefix: "/opt/homebrew".into(),
+        };
+        let state = state_with_php();
+        let cfg = Config::default();
+        let mut srv = server();
+        srv.default_site = true;
+        let v = ssl_vhost();
+        let out = Apache::render_conf(&srv, &[&v], &state, &cfg, &brew).unwrap();
+
+        let default_at = out.find("ServerName localhost\n    DocumentRoot").unwrap();
+        let redirect_at = out.find("RewriteRule ^ https://").unwrap();
+        assert!(
+            default_at < redirect_at,
+            "default-site catch-all must render before the redirect vhost"
+        );
     }
 }

@@ -2,6 +2,19 @@
 
 All notable changes to reeve are documented here.
 
+## 0.3.1
+
+### Fixed
+- **`--ssl` vhosts now redirect plain HTTP to HTTPS** on all three backends
+  (Apache, Caddy, nginx). Previously an SSL vhost was rendered only on the HTTPS
+  port, so visiting the bare `http://` URL either returned a confusing 403
+  (Apache with no default site) or silently served the catch-all default site's
+  content instead of the real one. Each SSL vhost now also gets a companion
+  HTTP block that issues a 301 to the HTTPS URL, preserving the request path and
+  query, and including the HTTPS port when it is non-standard (e.g. caddy 1443,
+  nginx 2443). On Apache the redirect vhosts render after the default-site
+  catch-all so that catch-all remains the default for genuinely unmatched hosts.
+
 ## 0.3.0
 
 ### Added

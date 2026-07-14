@@ -42,7 +42,9 @@ the thing the old switcher-script approach can't do.
 - **Directory parking** (Valet-style) — park `~/Sites` and every subfolder
   auto-serves as `<folder>.test`, framework auto-detected, no per-project setup.
   Odd folder names are slugified to valid hostnames automatically.
-- **Trusted local SSL** via a shared mkcert CA — `https://app.test` with no warnings.
+- **Trusted local SSL** via a shared mkcert CA — `https://app.test` with no
+  warnings. `--ssl` vhosts also redirect plain `http://` to HTTPS automatically,
+  so an old bookmark or a bare-domain visit lands on the secure URL.
 - **Wildcard DNS** for one or more TLDs (`.test`, `.localhost`, `.lan`, …) via a
   user-run dnsmasq (no root daemon).
 - **Default site** — optionally serve a catch-all from your sites root (with an

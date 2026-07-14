@@ -85,6 +85,19 @@ impl Nginx {
         let fastcgi_conf = etc.join("fastcgi.conf");
 
         for v in vhosts {
+            // Companion HTTP server that redirects to HTTPS. Emitted first (the
+            // loop body below has two exit points), so a plain http://host gets
+            // a 301 instead of hitting the default_server or nothing at all.
+            if v.ssl {
+                let authority = super::https_authority(&v.server_name, server.https_port);
+                out.push_str("    server {\n");
+                out.push_str(&format!("        listen {};\n", server.http_port));
+                out.push_str(&format!("        server_name {};\n", v.server_name));
+                out.push_str(&format!(
+                    "        return 301 https://{authority}$request_uri;\n"
+                ));
+                out.push_str("    }\n");
+            }
             out.push_str("    server {\n");
             if v.ssl {
                 out.push_str(&format!("        listen {} ssl;\n", server.https_port));
@@ -284,5 +297,97 @@ impl WebServerBackend for Nginx {
             keep_alive: true,
             run_at_load: true,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{Framework, PhpVersion};
+
+    fn server() -> Server {
+        Server {
+            name: "nginx".into(),
+            backend: Backend::Nginx,
+            http_port: 80,
+            https_port: 443,
+            enabled: true,
+            default_site: false,
+            default_preset: Framework::Generic,
+            default_root: None,
+            settings: Default::default(),
+        }
+    }
+
+    fn state_with_php() -> State {
+        let mut state = State::default();
+        state.php_versions.push(PhpVersion {
+            version: "8.3".into(),
+            fpm_socket: "/run/php83.sock".into(),
+            ..Default::default()
+        });
+        state
+    }
+
+    fn ssl_vhost() -> Vhost {
+        Vhost {
+            server_name: "app.test".into(),
+            server: "nginx".into(),
+            docroot: "/Sites/app".into(),
+            php_version: "8.3".into(),
+            ssl: true,
+            preset: Framework::Generic,
+            proxy_target: None,
+        }
+    }
+
+    #[test]
+    fn ssl_vhost_gets_http_redirect_server() {
+        let brew = Brew {
+            prefix: "/opt/homebrew".into(),
+        };
+        let state = state_with_php();
+        let cfg = Config::default();
+        let v = ssl_vhost();
+
+        // Standard 443 → redirect target has no port.
+        let out = Nginx::render_conf(&server(), &[&v], &state, &cfg, &brew).unwrap();
+        assert!(out.contains("return 301 https://app.test$request_uri;"));
+
+        // Non-standard HTTPS port → redirect target carries the port.
+        let mut alt = server();
+        alt.http_port = 2080;
+        alt.https_port = 2443;
+        let out = Nginx::render_conf(&alt, &[&v], &state, &cfg, &brew).unwrap();
+        assert!(out.contains("listen 2080;"));
+        assert!(out.contains("return 301 https://app.test:2443$request_uri;"));
+    }
+
+    #[test]
+    fn ssl_proxy_vhost_still_gets_redirect() {
+        // The redirect is emitted before the loop's proxy-path `continue`, so a
+        // reverse-proxy vhost with ssl must still get its HTTP→HTTPS redirect.
+        let brew = Brew {
+            prefix: "/opt/homebrew".into(),
+        };
+        let state = state_with_php();
+        let cfg = Config::default();
+        let mut v = ssl_vhost();
+        v.proxy_target = Some("http://localhost:5173".into());
+        let out = Nginx::render_conf(&server(), &[&v], &state, &cfg, &brew).unwrap();
+        assert!(out.contains("return 301 https://app.test$request_uri;"));
+    }
+
+    #[test]
+    fn non_ssl_vhost_has_no_redirect() {
+        let brew = Brew {
+            prefix: "/opt/homebrew".into(),
+        };
+        let state = state_with_php();
+        let cfg = Config::default();
+        let mut v = ssl_vhost();
+        v.ssl = false;
+        let out = Nginx::render_conf(&server(), &[&v], &state, &cfg, &brew).unwrap();
+        assert!(!out.contains("return 301"));
     }
 }

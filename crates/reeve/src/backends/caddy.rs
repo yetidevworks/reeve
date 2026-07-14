@@ -71,6 +71,21 @@ impl Caddy {
                 ));
             }
             out.push_str("}\n\n");
+
+            // Companion HTTP site that redirects to HTTPS. `auto_https off`
+            // disables Caddy's built-in redirect, so emit one explicitly —
+            // otherwise plain http://host has no matching site block.
+            if v.ssl {
+                let authority = super::https_authority(&v.server_name, server.https_port);
+                out.push_str(&format!(
+                    "http://{}:{} {{\n",
+                    v.server_name, server.http_port
+                ));
+                out.push_str(&format!(
+                    "\tredir https://{authority}{{uri}} permanent\n"
+                ));
+                out.push_str("}\n\n");
+            }
         }
 
         // Catch-all default site: any host not matched above (e.g. plain
@@ -268,5 +283,61 @@ mod tests {
         assert!(out.contains("php_fastcgi unix//run/php83.sock"));
         // Proxy vhost forwards upstream and emits no PHP for itself.
         assert!(out.contains("reverse_proxy http://localhost:5173"));
+    }
+
+    #[test]
+    fn ssl_vhost_gets_http_redirect_block() {
+        let mut state = State::default();
+        state.php_versions.push(PhpVersion {
+            version: "8.3".into(),
+            fpm_socket: "/run/php83.sock".into(),
+            ..Default::default()
+        });
+        let ssl = Vhost {
+            server_name: "app.test".into(),
+            server: "caddy".into(),
+            docroot: "/Sites/app".into(),
+            php_version: "8.3".into(),
+            ssl: true,
+            preset: Framework::Generic,
+            proxy_target: None,
+        };
+        let cfg = Config::default();
+        let vhosts = vec![&ssl];
+
+        // Standard 443 → redirect authority has no port.
+        let out = Caddy::render_caddyfile(&server(), &vhosts, &state, &cfg).unwrap();
+        assert!(out.contains("http://app.test:80 {"));
+        assert!(out.contains("redir https://app.test{uri} permanent"));
+
+        // Non-standard HTTPS port → authority carries the port.
+        let mut alt = server();
+        alt.http_port = 1080;
+        alt.https_port = 1443;
+        let out = Caddy::render_caddyfile(&alt, &vhosts, &state, &cfg).unwrap();
+        assert!(out.contains("http://app.test:1080 {"));
+        assert!(out.contains("redir https://app.test:1443{uri} permanent"));
+    }
+
+    #[test]
+    fn non_ssl_vhost_has_no_redirect_block() {
+        let mut state = State::default();
+        state.php_versions.push(PhpVersion {
+            version: "8.3".into(),
+            fpm_socket: "/run/php83.sock".into(),
+            ..Default::default()
+        });
+        let plain = Vhost {
+            server_name: "app.test".into(),
+            server: "caddy".into(),
+            docroot: "/Sites/app".into(),
+            php_version: "8.3".into(),
+            ssl: false,
+            preset: Framework::Generic,
+            proxy_target: None,
+        };
+        let cfg = Config::default();
+        let out = Caddy::render_caddyfile(&server(), &vec![&plain], &state, &cfg).unwrap();
+        assert!(!out.contains("redir "));
     }
 }

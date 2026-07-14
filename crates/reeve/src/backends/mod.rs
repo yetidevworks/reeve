@@ -55,6 +55,18 @@ pub fn server_service_id(server: &Server) -> String {
 /// Hostname the default-site HTTPS catch-all presents a cert for.
 pub const DEFAULT_SITE_HOST: &str = "localhost";
 
+/// The `host[:port]` authority a plain-HTTP request to an `--ssl` vhost should
+/// be redirected to. The port is omitted when HTTPS runs on the standard 443,
+/// but reeve's alt servers use non-standard ports (caddy 1443, nginx 2443), so
+/// it must be included there or the redirect would land on a dead 443.
+pub fn https_authority(host: &str, https_port: u16) -> String {
+    if https_port == 443 {
+        host.to_string()
+    } else {
+        format!("{host}:{https_port}")
+    }
+}
+
 /// FPM socket for the default-site catch-all: the configured default PHP
 /// version, else the first installed version. `None` if no PHP is managed
 /// (the default site then serves static files only).
