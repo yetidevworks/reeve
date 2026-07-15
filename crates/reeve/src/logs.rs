@@ -6,7 +6,7 @@
 use crate::paths;
 use crate::php;
 use crate::services;
-use crate::state::State;
+use crate::state::{Backend, State};
 use anyhow::{bail, Context, Result};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
@@ -29,6 +29,20 @@ pub fn targets(state: &State) -> Result<Vec<LogTarget>> {
             label: format!("server-{}", s.name),
             path: dir.join(format!("server-{}.log", s.name)),
         });
+        // Every backend writes its access log to the same standard path (flat
+        // format for Apache/nginx, native JSON for Caddy — see src/traffic.rs).
+        out.push(LogTarget {
+            label: format!("server-{}-access", s.name),
+            path: dir.join(format!("server-{}-access.log", s.name)),
+        });
+        // Apache/nginx split errors into their own file; Caddy's go to the
+        // service log above.
+        if matches!(s.backend, Backend::Apache | Backend::Nginx) {
+            out.push(LogTarget {
+                label: format!("server-{}-error", s.name),
+                path: dir.join(format!("server-{}-error.log", s.name)),
+            });
+        }
     }
     for p in &state.php_versions {
         out.push(LogTarget {

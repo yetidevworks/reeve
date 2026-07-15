@@ -2,6 +2,7 @@
 //! and action keys. Shares all lifecycle logic with the CLI via `crate::ops`.
 
 mod pathpick;
+mod traffic;
 mod ui;
 
 use crate::backends::settings_defs;
@@ -143,6 +144,19 @@ pub struct App {
     pub log_modal: Option<LogModal>,
     /// Full doctor report modal, when open.
     pub doctor_modal: Option<DoctorModal>,
+    /// Live traffic collector (tailer threads + event buffer). Created the
+    /// first time the traffic view opens, then kept for the whole session so
+    /// reopening the view keeps its history.
+    pub traffic: Option<crate::traffic::Monitor>,
+    /// Whether the full-screen traffic view is showing.
+    pub traffic_view: bool,
+    /// Index into the traffic filter cycle (all / per-server / per-vhost).
+    pub traffic_filter_idx: usize,
+    /// Text query narrowing the traffic view (set with `/`; matches host,
+    /// path, and server name).
+    pub traffic_search: String,
+    /// Whether the traffic view's `/` search input is capturing keystrokes.
+    pub traffic_search_input: bool,
     /// Worst-of health across all diagnostics, shown in the title bar.
     pub health: Health,
     /// Set after an action that may have disturbed the terminal (e.g. the admin
@@ -384,6 +398,11 @@ impl App {
             pending_dns: false,
             log_modal: None,
             doctor_modal: None,
+            traffic: None,
+            traffic_view: false,
+            traffic_filter_idx: 0,
+            traffic_search: String::new(),
+            traffic_search_input: false,
             health: Health::Ok,
             force_clear: false,
             should_quit: false,
@@ -678,6 +697,39 @@ pub fn snapshot(width: u16, height: u16, modal: &str) -> Result<String> {
         "doctor" => open_doctor(&mut app),
         "anon" => app.anonymize = true,
         "config" => open_config_modal(&mut app),
+        "traffic" => {
+            // Synthetic traffic so layout/binding can be verified headless.
+            let now = crate::traffic::now_epoch();
+            let mut events = Vec::new();
+            // A rough wave: more events for recent seconds, so the sparkline
+            // shows real scaling instead of a flat block.
+            for i in 0..600u64 {
+                let age = (i * i / 41) % 120;
+                let sec = now.saturating_sub(age);
+                let (host, server, status, ms) = match i % 7 {
+                    0 => ("grav.test", "apache", 200, 12.0),
+                    1 => ("grav.test", "apache", 200, 8.5),
+                    2 => ("app.caddy", "caddy", 404, 2.0),
+                    3 => ("app.caddy", "caddy", 200, 30.0),
+                    4 => ("api.test", "nginx", 500, 120.0),
+                    5 => ("grav.test", "apache", 301, 1.0),
+                    _ => ("api.test", "nginx", 200, 22.0),
+                };
+                events.push(crate::traffic::AccessEvent {
+                    epoch_sec: sec,
+                    time_hms: "10:11:12".into(),
+                    server: server.into(),
+                    host: host.into(),
+                    method: "GET".into(),
+                    path: format!("/page/{}", i % 5),
+                    status,
+                    bytes: 4096,
+                    duration_ms: ms,
+                });
+            }
+            app.traffic = Some(crate::traffic::Monitor::with_events(events));
+            app.traffic_view = true;
+        }
         "log" => {
             app.log_modal = Some(LogModal {
                 label: "server-caddy".into(),
@@ -706,7 +758,7 @@ pub fn snapshot(width: u16, height: u16, modal: &str) -> Result<String> {
     Ok(out)
 }
 
-pub async fn run() -> Result<()> {
+pub async fn run(traffic_view: bool) -> Result<()> {
     if load_config().is_err() {
         println!("reeve is not configured. Run `reeve init` first.");
         return Ok(());
@@ -714,6 +766,10 @@ pub async fn run() -> Result<()> {
 
     let mut terminal = setup_terminal()?;
     let mut app = App::load()?;
+    // `reeve traffic` lands directly in the live traffic monitor.
+    if traffic_view {
+        open_traffic(&mut app);
+    }
     let res = run_loop(&mut terminal, &mut app);
     restore_terminal(&mut terminal)?;
     res
@@ -725,13 +781,21 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) ->
             terminal.clear()?;
             app.force_clear = false;
         }
+        // Pull any newly-tailed access-log events into the traffic buffer
+        // (cheap channel drain; the tailer threads do the real work).
+        if let Some(m) = app.traffic.as_mut() {
+            m.ingest();
+        }
+
         terminal.draw(|f| ui::render(f, app))?;
         // ratatui can't store OSC 8 in its cell buffer, so stamp the recorded
         // URL regions as real hyperlinks straight onto the backend after draw.
         emit_hyperlinks(terminal, app)?;
 
         // Poll with a timeout so statuses refresh even without keypresses.
-        if event::poll(Duration::from_millis(2000))? {
+        // The traffic view redraws fast so its chart scrolls smoothly.
+        let tick = if app.traffic_view { 250 } else { 2000 };
+        if event::poll(Duration::from_millis(tick))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     handle_key(app, key.code, key.modifiers);
@@ -739,7 +803,9 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) ->
                 Event::Mouse(ev) => app.handle_mouse(ev),
                 _ => {}
             }
-        } else {
+        } else if !app.traffic_view {
+            // Status refresh shells out (launchctl et al) — skip it while the
+            // traffic view is up; it refreshes once on close.
             app.refresh();
         }
 
@@ -784,6 +850,11 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) ->
 }
 
 fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    // The full-screen traffic view captures all input while showing.
+    if app.traffic_view {
+        traffic::handle_key(app, code);
+        return;
+    }
     // Modals capture all input while open.
     if app.confirm_remove.is_some() {
         handle_confirm_key(app, code);
@@ -944,6 +1015,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             app.sort_vhosts();
         }
         KeyCode::Char('L') => open_log(app),
+        KeyCode::Char('t') => open_traffic(app),
         // Secret screenshot anonymizer (not advertised in the key bar): toggle
         // rewriting the real home path to /Users/andy in displayed paths.
         KeyCode::Char('~') => {
@@ -1078,6 +1150,32 @@ fn open_log(app: &mut App) {
         }
         Err(e) => app.message = format!("✗ log: {e}"),
     }
+}
+
+/// Open the full-screen traffic view, starting (or rebuilding, if the server
+/// list changed) the access-log collector. The collector keeps running after
+/// the view closes so its history survives reopening.
+fn open_traffic(app: &mut App) {
+    let names: Vec<String> = app.state.servers.iter().map(|s| s.name.clone()).collect();
+    if names.is_empty() {
+        app.message = "no servers to monitor — add one first".into();
+        return;
+    }
+    let rebuild = app
+        .traffic
+        .as_ref()
+        .map(|m| m.servers != names)
+        .unwrap_or(true);
+    if rebuild {
+        match crate::traffic::Monitor::start(&app.state) {
+            Ok(m) => app.traffic = Some(m),
+            Err(e) => {
+                app.message = format!("✗ traffic: {e}");
+                return;
+            }
+        }
+    }
+    app.traffic_view = true;
 }
 
 /// Open the full doctor report as a modal (the title only shows a dot).

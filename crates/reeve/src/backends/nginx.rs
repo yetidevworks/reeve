@@ -74,8 +74,13 @@ impl Nginx {
         out.push_str(&format!("    fastcgi_temp_path {};\n", tmp("fcgi")));
         out.push_str(&format!("    uwsgi_temp_path {};\n", tmp("uwsgi")));
         out.push_str(&format!("    scgi_temp_path {};\n", tmp("scgi")));
+        // Access log in reeve's flat format, shared with Apache (see
+        // src/traffic.rs): ts host method "uri" status bytes duration client.
+        out.push_str(
+            "    log_format reeve '$time_iso8601 $host $request_method \"$request_uri\" $status $body_bytes_sent ${request_time}s $remote_addr';\n",
+        );
         out.push_str(&format!(
-            "    access_log {};\n",
+            "    access_log {} reeve;\n",
             q(&logs
                 .join(format!("server-{}-access.log", server.name))
                 .display()
@@ -361,6 +366,24 @@ mod tests {
         let out = Nginx::render_conf(&alt, &[&v], &state, &cfg, &brew).unwrap();
         assert!(out.contains("listen 2080;"));
         assert!(out.contains("return 301 https://app.test:2443$request_uri;"));
+    }
+
+    #[test]
+    fn access_log_uses_reeve_format() {
+        let brew = Brew {
+            prefix: "/opt/homebrew".into(),
+        };
+        let state = state_with_php();
+        let cfg = Config::default();
+        let v = ssl_vhost();
+        let out = Nginx::render_conf(&server(), &[&v], &state, &cfg, &brew).unwrap();
+        assert!(out.contains(
+            r#"log_format reeve '$time_iso8601 $host $request_method "$request_uri" $status $body_bytes_sent ${request_time}s $remote_addr';"#
+        ));
+        // The path may be quoted (it can contain "Application Support"), so
+        // check the filename and the named format separately.
+        assert!(out.contains("server-nginx-access.log"));
+        assert!(out.contains(" reeve;\n"));
     }
 
     #[test]

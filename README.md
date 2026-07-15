@@ -52,6 +52,11 @@ the thing the old switcher-script approach can't do.
   Each server can override its default root, or share the global sites root.
 - **`logs` + `doctor`** — tail any service's log, and a one-shot health check of
   the whole stack (Homebrew, servers, FPM, services, DNS, certs, ports).
+- **Live traffic monitor** (`t` in the TUI, or `reeve traffic`) — a full-screen
+  requests/sec chart with status-class breakdown, latency, top hosts/paths, and
+  a live request tail, filterable to one server or one vhost. Backed by a
+  consistent access log per server (`logs/server-<name>-access.log`) on every
+  backend, so `reeve logs <server>-access` works the same everywhere too.
 - **Honest, port-aware status** — `running` only when the port is actually bound;
   otherwise `loaded, not bound`, `:<port> held by <process>`, or `crashed`.
   `start`/`restart` preflight the ports and name any foreign process holding them.
@@ -200,6 +205,7 @@ keys for the focused panel).
 | `d` | Set default PHP version (PHP panel) |
 | `p` | Park a directory / manage parks (Vhosts or Parked panel) |
 | `L` | View the focused item's log |
+| `t` | Live traffic monitor (`←` `→` cycle the server/vhost filter, `/` text search, `Esc` back) |
 | `?` | Full `doctor` health report |
 | `T` | Install the mkcert CA into your trust store (`ssl trust`) |
 | `Del` / `Backspace` | Remove the focused item (with confirm) |
@@ -210,6 +216,37 @@ keys for the focused panel).
 
 The new-vhost wizard (`n` on Vhosts) covers framework **presets** and a
 **reverse-proxy** target, so everything the CLI does is reachable from the TUI.
+
+### Traffic monitor
+
+Press `t` (or run `reeve traffic`) for a full-screen live view of requests
+hitting your sites — across all servers, one server, or one vhost:
+
+```
+ reeve traffic   filter: ‹ all servers ›   ● live
+┌ Requests/sec — last 120s · 550 req · peak 15/s ──────────────────────────────┐
+│                                        ▂▄▆█▆▄▂                          ▄█▇  │
+│  ▁▂▃▄▃▂▁       ▂▄▆▄▂      ▁▃▅▃▁      ▂▄██████▄▂        ▂▃▄▃▂          ▃▆███▅ │
+│▄█████████▄▄▄▄▆██████▆▄▄▅███████▅▄▄▄▆███████████▆▄▄▄▄▄▆███████▆▄▄▄▄▄▄▅███████│
+└──────────────────────────────────────────────────────────────────────────────┘
+┌ Status ────────────────────┐┌ Top hosts ──────────────┐┌ Top paths ──────────┐
+│ rate  6/s  peak 15/s       ││ grav.test  ▐▐▐▐▐▐▐▐ 93  ││ /blog  ▐▐▐▐▐▐▐▐ 44  │
+│ 2xx  ▐▐▐▐▐▐▐▐▐▐▐▐▐▐ 124    ││ app.caddy  ▐▐▐▐▐ 63     ││ /api   ▐▐▐▐▐ 41     │
+│ 4xx  ▐▐▐▐           32     ││ api.test   ▐▐▐▐ 60      ││ /      ▐▐▐ 22       │
+│ time  avg 27ms · max 120ms ││                         ││                     │
+└────────────────────────────┘└─────────────────────────┘└─────────────────────┘
+┌ Live requests ───────────────────────────────────────────────────────────────┐
+│ 10:11:12 200 GET  grav.test   /blog                12ms   29.8 KB [apache]   │
+│ 10:11:12 404 GET  app.caddy   /missing              2ms     236 B [caddy]    │
+└──────────────────────────────────────────────────────────────────────────────┘
+ ←→ filter   PgUp/Dn jump   / search   0 all   esc/t back
+```
+
+Every backend writes an access log to the same place
+(`logs/server-<name>-access.log`) — Apache and nginx in a shared flat format,
+Caddy in its native JSON — and reeve parses them all into the same stream. The
+collector tails the logs only while the dashboard runs, keeps the last 10
+minutes, and survives closing/reopening the view.
 
 ## Commands
 
@@ -231,7 +268,8 @@ The new-vhost wizard (`n` on Vhosts) covers framework **presets** and a
 | `park list\|remove <dir>` | Manage parked directories |
 | `apply` | Render generated configs + reconcile running services |
 | `validate` | Run every backend's native config test |
-| `logs [<target>] [-n N] [--follow]` | View or tail a service's log |
+| `traffic` | Open the dashboard straight into the live traffic monitor |
+| `logs [<target>] [-n N] [--follow]` | View or tail a service's log (incl. `server-<name>-access`) |
 | `doctor` | Diagnose the whole stack (brew, servers, FPM, services, DNS, certs, ports) |
 | `update [--check]` | Self-update to the latest GitHub release (`--check` only reports) |
 | `ssl mint <host>` / `ssl trust` / `ssl untrust` / `ssl status` / `ssl ca` | Local certificates: mint one, install/remove the mkcert CA in the trust store, or show its state |

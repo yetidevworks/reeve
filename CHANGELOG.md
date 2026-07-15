@@ -2,6 +2,32 @@
 
 All notable changes to reeve are documented here.
 
+## 0.3.3
+
+### Added
+- **Live traffic monitor.** Press `t` in the dashboard (or run `reeve traffic`)
+  for a full-screen live view of requests hitting your sites: a requests/sec
+  chart over the last couple of minutes, status-class breakdown (2xx/3xx/4xx/5xx)
+  with latency and bytes, top hosts and top paths, and a color-coded live
+  request tail. `←`/`→` cycles the scope through all servers, each server, and
+  each vhost (declared + parked); `PgUp`/`PgDn` jumps through long filter lists;
+  `/` starts a live text search that narrows everything by host, path, or
+  server name (enter keeps it, esc clears it).
+  The collector tails the access logs on background threads only while the
+  dashboard runs, keeps the last 10 minutes of events, and survives
+  closing/reopening the view.
+- **Consistent access logs on every backend.** Each server now writes an access
+  log to the same standard path, `logs/server-<name>-access.log`. Apache and
+  nginx share one flat, greppable format (timestamp, vhost, method, URI, status,
+  bytes, duration, client); Caddy — which can't be shaped into a custom line
+  format — writes its native JSON to the same path, and reeve parses both into
+  the same event stream. No more hunting for where each web server keeps its
+  logs.
+- **Access and error logs are now first-class log targets.** `reeve logs` lists
+  `server-<name>-access` for every server (and `server-<name>-error` for
+  Apache/nginx, which split errors into their own file), so
+  `reeve logs server-caddy-access --follow` works like any other target.
+
 ## 0.3.2
 
 ### Fixed

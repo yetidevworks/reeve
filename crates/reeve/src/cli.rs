@@ -66,6 +66,9 @@ pub enum Commands {
         follow: bool,
     },
 
+    /// Open the dashboard straight into the live traffic monitor.
+    Traffic,
+
     /// Diagnose the stack: Homebrew, servers, FPM, DNS, certs, ports.
     Doctor,
 

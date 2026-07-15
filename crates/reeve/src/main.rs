@@ -15,6 +15,7 @@ mod probe;
 mod services;
 mod ssl;
 mod state;
+mod traffic;
 mod tui;
 mod update;
 mod vhost;
@@ -42,7 +43,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        None => tui::run().await,
+        None => tui::run(false).await,
+        Some(Commands::Traffic) => tui::run(true).await,
         Some(Commands::Init) => cmd_init(),
         Some(Commands::Php(c)) => cmd_php(c),
         Some(Commands::Server(c)) => cmd_server(c),

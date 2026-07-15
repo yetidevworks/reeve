@@ -19,6 +19,14 @@ pub fn render(f: &mut Frame, app: &App) {
     // stamps the entries as OSC 8 hyperlinks after the draw completes.
     app.links.borrow_mut().clear();
 
+    // The traffic view replaces the whole dashboard while it's open. Clear the
+    // mouse hit-rects too so clicks can't reach the hidden panels.
+    if app.traffic_view {
+        app.hit_rects.borrow_mut().clear();
+        super::traffic::render(f, app);
+        return;
+    }
+
     let servers_h = (app.state.servers.len() as u16 + 2).clamp(3, 14);
     let php_h = 3;
     let services_h = (app.state.services.len() as u16 + 2).clamp(3, 8);
@@ -582,6 +590,7 @@ fn render_keys(f: &mut Frame, app: &App, area: Rect) {
             ("s", "settings"),
             ("R/del", "remove"),
             ("a", "apply"),
+            ("t", "traffic"),
             ("L", "log"),
             ("c", "config"),
             ("q", "quit"),
@@ -595,6 +604,7 @@ fn render_keys(f: &mut Frame, app: &App, area: Rect) {
             ("1-4", "sort"),
             ("a", "apply"),
             ("v", "validate"),
+            ("t", "traffic"),
             ("L", "log"),
             ("q", "quit"),
         ],
@@ -877,7 +887,7 @@ fn render_title(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         Span::raw("   "),
         Span::styled(hsym, Style::default().fg(hcolor)),
         Span::styled(
-            " health  ? doctor · L logs · T trust",
+            " health  ? doctor · t traffic · L logs · T trust",
             Style::default().fg(Color::DarkGray),
         ),
     ]);

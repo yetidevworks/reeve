@@ -121,6 +121,19 @@ impl Apache {
                 .to_string())
         ));
         out.push_str("LogLevel warn\n");
+        // Access log in reeve's flat format, shared with nginx (see
+        // src/traffic.rs): ts host method "uri" status bytes duration client.
+        // %v = the serving vhost's ServerName, %{ms}T = duration in ms.
+        out.push_str(
+            "LogFormat \"%{%Y-%m-%dT%H:%M:%S%z}t %v %m \\\"%U%q\\\" %>s %B %{ms}Tms %a\" reeve\n",
+        );
+        out.push_str(&format!(
+            "CustomLog {} reeve\n",
+            q(&paths::logs_dir()?
+                .join(format!("server-{}-access.log", server.name))
+                .display()
+                .to_string())
+        ));
         out.push_str("<IfModule mime_module>\n");
         out.push_str(&format!(
             "    TypesConfig {}\n",
@@ -417,6 +430,22 @@ mod tests {
         let out = Apache::render_conf(&alt, &[&v], &state, &cfg, &brew).unwrap();
         assert!(out.contains("<VirtualHost *:8080>"));
         assert!(out.contains("RewriteRule ^ https://app.test:8443%{REQUEST_URI} [R=301,L]"));
+    }
+
+    #[test]
+    fn access_log_uses_reeve_format() {
+        let brew = Brew {
+            prefix: "/opt/homebrew".into(),
+        };
+        let state = state_with_php();
+        let cfg = Config::default();
+        let v = ssl_vhost();
+        let out = Apache::render_conf(&server(), &[&v], &state, &cfg, &brew).unwrap();
+        assert!(out.contains(
+            r#"LogFormat "%{%Y-%m-%dT%H:%M:%S%z}t %v %m \"%U%q\" %>s %B %{ms}Tms %a" reeve"#
+        ));
+        assert!(out.contains("server-apache-access.log"));
+        assert!(out.contains("CustomLog"));
     }
 
     #[test]
