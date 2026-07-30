@@ -13,8 +13,54 @@ permissions:
   contents: write
 
 jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.cargo.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Read version from Cargo.toml
+        id: cargo
+        run: |
+          set -euo pipefail
+          # The version lives under [workspace.package] in the root manifest.
+          VERSION=$(awk '
+            /^\[workspace.package\]/ {pkg=1; next}
+            /^\[/ {pkg=0}
+            pkg && $1 == "version" && $2 == "=" {
+              gsub(/"/, "", $3)
+              print $3
+              exit
+            }
+          ' Cargo.toml)
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      # This gate has to run before anything publishes, not alongside it.
+      # `cargo publish` uploads whatever Cargo.toml says regardless of the tag
+      # name, so a mismatched tag would otherwise publish anyway and burn a
+      # version number that can never be reused.
+      - name: Verify the tag matches the crate version
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          CARGO_VERSION='${{ steps.cargo.outputs.version }}'
+          if [[ -z "${CARGO_VERSION}" ]]; then
+            echo "Could not read a version from Cargo.toml." >&2
+            exit 1
+          fi
+          if [[ "${TAG_VERSION}" != "${CARGO_VERSION}" ]]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match Cargo version ${CARGO_VERSION}." >&2
+            echo "Nothing has been published. Fix one or the other and re-tag." >&2
+            exit 1
+          fi
+          echo "Tag ${GITHUB_REF_NAME} matches Cargo version ${CARGO_VERSION}."
+
   build:
     name: Build ${{ matrix.target }}
+    needs: verify
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -75,7 +121,7 @@ jobs:
 
   release:
     name: Create Release
-    needs: build
+    needs: [verify, build]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -97,7 +143,7 @@ jobs:
 
   publish-crate:
     name: Publish to crates.io
-    needs: release
+    needs: [verify, release]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -113,7 +159,7 @@ jobs:
 
   update-formula:
     name: Update Homebrew tap
-    needs: release
+    needs: [verify, release]
     runs-on: ubuntu-latest
     env:
       FORMULA_PATH: Formula/reeve.rb
