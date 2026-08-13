@@ -384,6 +384,12 @@ fn cmd_php(c: PhpCommands) -> Result<()> {
             let mode = state::XdebugMode::from_str(&mode)?;
             ops::set_xdebug(&version, mode)?;
             println!("✓ PHP {version}: Xdebug {} (FPM restarted)", mode.as_str());
+            if mode == state::XdebugMode::Debug {
+                println!(
+                    "  Sessions start on demand: use an IDE debug run configuration, a browser\n  \
+                     extension, or add ?XDEBUG_SESSION=1 to the URL."
+                );
+            }
             Ok(())
         }
     }

@@ -122,7 +122,9 @@ pub enum PhpCommands {
         key: String,
         value: String,
     },
-    /// Toggle Xdebug for a version: off | debug | profile.
+    /// Toggle Xdebug for a version: off | debug | profile. `debug` attaches
+    /// only to requests carrying XDEBUG_SESSION/XDEBUG_TRIGGER; `profile`
+    /// profiles every request.
     Xdebug { version: String, mode: String },
 }
 

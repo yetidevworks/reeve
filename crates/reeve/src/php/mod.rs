@@ -324,16 +324,19 @@ fn build_fpm_conf(php: &PhpVersion) -> Result<String> {
 fn fpm_define_args(php: &PhpVersion) -> Vec<String> {
     let mut d = Vec::new();
     // Default Xdebug fully off so an installed-but-idle Xdebug stops adding
-    // per-call overhead; when enabled, set the client port and connect only on
-    // an explicit trigger (XDEBUG_SESSION cookie/param) — `yes` would make
-    // every request from every vhost race for the IDE's connection slots.
+    // per-call overhead; when enabled, set the client port and the per-mode
+    // start policy (debug waits for a trigger so vhosts stop racing for the
+    // IDE's connection slot; profile runs on every request).
     d.push("-d".into());
     d.push(format!("xdebug.mode={}", php.xdebug.as_str()));
     if !php.xdebug.is_off() {
         d.push("-d".into());
         d.push(format!("xdebug.client_port={}", php.xdebug_port));
         d.push("-d".into());
-        d.push("xdebug.start_with_request=trigger".into());
+        d.push(format!(
+            "xdebug.start_with_request={}",
+            php.xdebug.start_with_request()
+        ));
     }
     // opcache.enable as a startup define (avoids the per-request warning).
     d.push("-d".into());
@@ -620,7 +623,9 @@ mod tests {
         assert!(conf.contains("pm.max_children = 32"));
         assert!(conf.contains("php_admin_value[memory_limit] = 1G"));
 
-        // Enabling Xdebug adds the port + auto-trigger to the startup defines.
+        // Enabling Xdebug adds the port + start policy to the startup defines.
+        // Debug waits for an XDEBUG_SESSION/XDEBUG_TRIGGER request so other
+        // vhosts stop stealing the IDE's single connection slot.
         php.xdebug = XdebugMode::Debug;
         php.xdebug_port = 9009;
         assert_eq!(
@@ -632,6 +637,23 @@ mod tests {
                 "xdebug.client_port=9009",
                 "-d",
                 "xdebug.start_with_request=trigger",
+                "-d",
+                "opcache.enable=1",
+            ]
+        );
+
+        // Profiling has no such contention and must stay on for every request:
+        // with `trigger` a normal page load writes no cachegrind file at all.
+        php.xdebug = XdebugMode::Profile;
+        assert_eq!(
+            fpm_define_args(&php),
+            vec![
+                "-d",
+                "xdebug.mode=profile",
+                "-d",
+                "xdebug.client_port=9009",
+                "-d",
+                "xdebug.start_with_request=yes",
                 "-d",
                 "opcache.enable=1",
             ]
