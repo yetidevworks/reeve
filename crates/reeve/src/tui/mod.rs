@@ -2547,10 +2547,16 @@ fn run_xdebug_suspended(
     );
     let result = ops::set_xdebug(version, mode);
     match &result {
-        Ok(()) => println!(
-            "\n✓ Xdebug {} for PHP {version}. Press any key to return…",
-            mode.as_str()
-        ),
+        Ok(()) => {
+            println!("\n✓ Xdebug {} for PHP {version}.", mode.as_str());
+            if mode == XdebugMode::Debug {
+                println!(
+                    "  Sessions start on demand: use an IDE debug run configuration, a browser\n  \
+                     extension, or add ?XDEBUG_SESSION=1 to the URL."
+                );
+            }
+            println!("\nPress any key to return…");
+        }
         Err(e) => println!("\n✗ {e}\nPress any key to return…"),
     }
     let _ = enable_raw_mode();

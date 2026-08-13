@@ -122,6 +122,24 @@ impl XdebugMode {
         }
     }
 
+    /// The value to write for `xdebug.start_with_request`.
+    ///
+    /// Debug waits for an explicit trigger (an `XDEBUG_SESSION` /
+    /// `XDEBUG_TRIGGER` cookie or query param, which IDE debug run
+    /// configurations and browser extensions set for you): IDEs accept one
+    /// simultaneous connection by default, so with `yes` a background request
+    /// from another vhost grabs the slot and the page you actually wanted to
+    /// debug never attaches. Profiling has no such contention, and a profiler
+    /// you have to opt each request into produces no cachegrind files at all
+    /// for a normal page load, so it stays on for every request.
+    pub fn start_with_request(&self) -> &'static str {
+        match self {
+            XdebugMode::Off => "no",
+            XdebugMode::Debug => "trigger",
+            XdebugMode::Profile => "yes",
+        }
+    }
+
     pub fn is_off(&self) -> bool {
         matches!(self, XdebugMode::Off)
     }

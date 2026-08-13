@@ -2,6 +2,19 @@
 
 All notable changes to reeve are documented here.
 
+## 0.3.4
+
+### Fixed
+- **Xdebug `debug` mode no longer fights itself across vhosts.** The FPM master
+  started every request with `xdebug.start_with_request=yes`, so any request
+  from any vhost — a background AJAX call, another site you had open — raced for
+  the IDE's debug connection. IDEs accept one simultaneous connection by
+  default, so the page you actually wanted to debug would silently never attach.
+  `debug` now uses `trigger`: sessions start on demand, from an IDE debug run
+  configuration, a browser extension, or `?XDEBUG_SESSION=1` on the URL.
+  `profile` mode is unchanged and still profiles every request.
+  (Thanks @ruslanbelziuk.)
+
 ## 0.3.3
 
 ### Added

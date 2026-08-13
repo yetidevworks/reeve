@@ -30,7 +30,10 @@ the thing the old switcher-script approach can't do.
 - **Per-vhost PHP version** — each vhost picks its PHP; versions run side by side.
 - **Per-version PHP tuning** — `memory_limit`, upload sizes, OPcache, FPM pool,
   timezone, and a one-click **Xdebug** toggle (off/debug/profile), all without
-  hand-editing `php.ini`.
+  hand-editing `php.ini`. In `debug` mode Xdebug attaches only to requests
+  carrying `XDEBUG_SESSION`/`XDEBUG_TRIGGER` — set by any IDE debug run
+  configuration or browser extension — so background traffic from your other
+  sites can't steal the IDE's connection slot.
 - **Multiple backends** behind one abstraction: **Caddy**, **Apache**, **nginx**
   (OpenLiteSpeed is wired but unsupported on macOS — see below).
 - **Run several servers at once**, on different ports, managed independently.
@@ -133,7 +136,7 @@ Add a database and a mail catcher, tune PHP, or use a framework preset:
 reeve service add mysql && reeve service start mysql   # MySQL on :3306
 reeve service add mailpit && reeve service start mailpit  # SMTP :1025, UI :8025
 reeve php set 8.3 memory_limit 512M                    # tune php.ini
-reeve php xdebug 8.3 debug                              # one-click Xdebug
+reeve php xdebug 8.3 debug                              # Xdebug, attaches on XDEBUG_SESSION
 reeve vhost add shop.test --root ~/Sites/shop --php 8.3 --server caddy --ssl --preset laravel
 reeve vhost add ui.test --proxy http://localhost:5173 --server caddy --ssl   # reverse proxy
 ```
@@ -258,7 +261,7 @@ minutes, and survives closing/reopening the view.
 | `php cli [ver]` | Switch the terminal `php` (via the `~/.reeve/bin` shim); omit to show current |
 | `php ext add\|remove\|list <ver> [name]` | Manage extensions per version (pecl) |
 | `php settings <ver>` / `php set <ver> <key> <value>` | Show / tune php.ini, OPcache, FPM pool |
-| `php xdebug <ver> off\|debug\|profile` | Toggle Xdebug for a version |
+| `php xdebug <ver> off\|debug\|profile` | Toggle Xdebug for a version (`debug` attaches only to requests carrying `XDEBUG_SESSION`/`XDEBUG_TRIGGER`; `profile` profiles every request) |
 | `server add <backend> [--http N --https N] [--default-site] [--root <dir>] [--preset <fw>]` | Add caddy\|apache\|nginx (optionally a catch-all default site; `--root` overrides its docroot, else the global sites root) |
 | `server start\|stop\|restart\|list\|remove <name>` | Manage a server (independent) |
 | `vhost add <host> --root <dir> --php <ver> --server <name> [--ssl] [--preset <fw>] [--proxy <url>]` | Add a vhost |
