@@ -226,6 +226,9 @@ pub enum Framework {
     Symfony,
     Grav,
     Drupal,
+    /// Any app that serves from a `public/` subdir without framework-specific
+    /// rewrites — a plain PHP front controller, a static build output, etc.
+    Public,
 }
 
 impl Framework {
@@ -237,6 +240,7 @@ impl Framework {
             Framework::Symfony => "symfony",
             Framework::Grav => "grav",
             Framework::Drupal => "drupal",
+            Framework::Public => "public",
         }
     }
 
@@ -245,7 +249,7 @@ impl Framework {
     }
 
     /// Every preset, in selector order.
-    pub fn all() -> [Framework; 6] {
+    pub fn all() -> [Framework; 7] {
         [
             Framework::Generic,
             Framework::Laravel,
@@ -253,13 +257,14 @@ impl Framework {
             Framework::Symfony,
             Framework::Grav,
             Framework::Drupal,
+            Framework::Public,
         ]
     }
 
     /// Conventional public subdirectory served as the docroot (empty = root).
     pub fn public_subdir(&self) -> &'static str {
         match self {
-            Framework::Laravel | Framework::Symfony => "public",
+            Framework::Laravel | Framework::Symfony | Framework::Public => "public",
             Framework::Drupal => "web",
             _ => "",
         }
@@ -282,15 +287,29 @@ impl FromStr for Framework {
             "symfony" => Ok(Framework::Symfony),
             "grav" => Ok(Framework::Grav),
             "drupal" => Ok(Framework::Drupal),
+            "public" => Ok(Framework::Public),
             other => bail!(
                 "Unknown preset '{other}'. Use \
-                 generic|laravel|wordpress|symfony|grav|drupal."
+                 generic|laravel|wordpress|symfony|grav|drupal|public."
             ),
         }
     }
 }
 
-/// Binds a hostname to a docroot, an owning server, and a PHP version.
+/// `root/sub`, or just `root` when `sub` is empty. Tolerates a trailing slash
+/// on `root` and leading/trailing slashes on `sub`.
+pub fn join_subdir(root: &str, sub: &str) -> String {
+    let sub = sub.trim_matches('/');
+    if sub.is_empty() {
+        root.to_string()
+    } else {
+        format!("{}/{}", root.trim_end_matches('/'), sub)
+    }
+}
+
+/// Binds a hostname to a project directory, an owning server, and a PHP
+/// version. `docroot` is the *project* root; what the server actually serves
+/// comes from [`crate::project::resolve`] (preset subdir or `.reeve.toml`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Vhost {
     /// e.g. "grav.test"
@@ -312,16 +331,6 @@ pub struct Vhost {
 }
 
 impl Vhost {
-    /// The docroot actually served, with the preset's public subdir appended.
-    pub fn effective_docroot(&self) -> String {
-        let sub = self.preset.public_subdir();
-        if sub.is_empty() {
-            self.docroot.clone()
-        } else {
-            format!("{}/{}", self.docroot.trim_end_matches('/'), sub)
-        }
-    }
-
     /// True when this vhost is a reverse proxy rather than a file/PHP server.
     pub fn is_proxy(&self) -> bool {
         self.proxy_target.is_some()
@@ -609,7 +618,10 @@ mod tests {
         assert!(back.vhosts[0].ssl);
         assert_eq!(back.vhosts[0].preset, Framework::Laravel);
         // Laravel serves from the public/ subdir.
-        assert_eq!(back.vhosts[0].effective_docroot(), "/Sites/a/public");
+        assert_eq!(
+            crate::project::resolve(&back.vhosts[0]).unwrap().docroot,
+            "/Sites/a/public"
+        );
     }
 
     #[test]

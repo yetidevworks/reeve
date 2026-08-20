@@ -40,11 +40,14 @@ the thing the old switcher-script approach can't do.
 - **Background services** — install/start/stop **MySQL, MariaDB, PostgreSQL,
   Redis, memcached, Mailpit** via Homebrew + launchd/systemd, alongside the web stack.
 - **Framework presets** — `laravel`, `wordpress`, `symfony`, `grav`, `drupal`
-  set the right docroot + rewrites automatically; or point a vhost at an
-  upstream dev server as a **reverse proxy** (Vite, Node, …).
+  set the right docroot + rewrites automatically, `public` serves any app from
+  its `public/` subdir; or point a vhost at an upstream dev server as a
+  **reverse proxy** (Vite, Node, …).
 - **Directory parking** (Valet-style) — park `~/Sites` and every subfolder
   auto-serves as `<folder>.test`, framework auto-detected, no per-project setup.
   Odd folder names are slugified to valid hostnames automatically.
+- **Per-project overrides** — an optional `.reeve.toml` in a project sets its
+  docroot, preset, and environment variables for PHP, on every backend.
 - **Trusted local SSL** via a shared mkcert CA — `https://app.test` with no
   warnings. `--ssl` vhosts also redirect plain `http://` to HTTPS automatically,
   so an old bookmark or a bare-domain visit lands on the secure URL.
@@ -147,6 +150,20 @@ Or park a directory so every project in it just works, no per-site setup:
 reeve park add ~/Sites --server caddy --php 8.3 --ssl   # ~/Sites/blog → blog.test, etc.
 reeve apply                                             # picks up new folders anytime
 ```
+
+Parked folders are served from `public/` or `web/` when a framework (or just a `public/index.*`) is detected, otherwise from the folder itself. When that guess is wrong, or a project needs environment variables, drop a `.reeve.toml` in the project root — it works for parked and declared sites alike, on Apache, nginx, and Caddy, and is re-read on every `apply`:
+
+```toml
+# .reeve.toml — every key is optional
+docroot = "dist"        # subdir to serve, relative to the project
+preset = "grav"         # override auto-detection / the vhost's preset
+
+[env]                   # reaches PHP as getenv("DB_USER") / $_SERVER["DB_USER"]
+DB_USER = "root"
+DB_PASS = "secret"
+```
+
+Add it to `.gitignore` if it holds secrets. On Apache, a plain `.htaccess` works too (`AllowOverride All`, with `SetEnv` and `CGIPassAuth` available); nginx can't express a literal `$` in a value, so `apply` refuses such entries with a clear error rather than passing a mangled value to PHP.
 
 One-time DNS + trust setup so `*.test` resolves system-wide and certs are trusted:
 

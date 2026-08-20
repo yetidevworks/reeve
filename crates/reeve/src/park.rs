@@ -12,7 +12,9 @@ use std::path::Path;
 const INDEX_MARKERS: [&str; 3] = ["index.php", "index.html", "index.htm"];
 
 /// Detect a framework from a project directory's layout, so parked sites get the
-/// right docroot + rewrites automatically. Falls back to `Generic`.
+/// right docroot + rewrites automatically. Anything else with a `public/`
+/// index (a plain front controller, a static build) becomes `Public` so it's
+/// served from that subdir; otherwise `Generic` serves the project root.
 fn detect_framework(dir: &Path) -> Framework {
     // Laravel/Symfony: a `public/` dir with a front controller.
     if dir.join("public/index.php").is_file() {
@@ -22,8 +24,7 @@ fn detect_framework(dir: &Path) -> Framework {
         if dir.join("bin/console").is_file() || dir.join("symfony.lock").is_file() {
             return Framework::Symfony;
         }
-        // A bare public/index.php is still Laravel-shaped (public docroot).
-        return Framework::Laravel;
+        return Framework::Public;
     }
     if dir.join("web/index.php").is_file() {
         return Framework::Drupal;
@@ -34,7 +35,26 @@ fn detect_framework(dir: &Path) -> Framework {
     if dir.join("system/defines.php").is_file() && dir.join("user").is_dir() {
         return Framework::Grav;
     }
+    // A static `public/` (e.g. a Vite/Astro/Eleventy build) — still a public
+    // docroot, just no PHP front controller.
+    if INDEX_MARKERS
+        .iter()
+        .any(|m| dir.join("public").join(m).is_file())
+    {
+        return Framework::Public;
+    }
     Framework::Generic
+}
+
+/// The preset a parked folder is served with: its `.reeve.toml` `preset` if it
+/// declares one, else layout detection. A malformed project file is ignored
+/// here (listing must not fail); `apply` reports it when rendering.
+fn preset_for(dir: &Path) -> Framework {
+    crate::project::load(dir)
+        .ok()
+        .flatten()
+        .and_then(|p| p.preset)
+        .unwrap_or_else(|| detect_framework(dir))
 }
 
 /// Convert a folder name into a DNS-safe host label (the bit before the TLD).
@@ -72,8 +92,11 @@ fn host_label(name: &str) -> Option<String> {
 }
 
 /// True if a directory has any web content worth serving (an index file in the
-/// root or in a conventional public subdir).
+/// root or in a conventional public subdir), or a `.reeve.toml` that says so.
 fn is_web_project(dir: &Path) -> bool {
+    if dir.join(crate::project::FILE_NAME).is_file() {
+        return true;
+    }
     if INDEX_MARKERS.iter().any(|m| dir.join(m).is_file()) {
         return true;
     }
@@ -127,7 +150,7 @@ pub fn expand(park: &Park) -> Vec<Vhost> {
             docroot: path.display().to_string(),
             php_version: park.php_version.clone(),
             ssl: park.ssl,
-            preset: detect_framework(&path),
+            preset: preset_for(&path),
             proxy_target: None,
         });
     }
@@ -222,10 +245,58 @@ mod tests {
         let shop = sites.iter().find(|v| v.server_name == "shop.test").unwrap();
         assert_eq!(shop.preset, Framework::Laravel);
         assert_eq!(
-            shop.effective_docroot(),
+            crate::project::resolve(shop).unwrap().docroot,
             format!("{}/shop/public", base.display())
         );
         assert!(shop.ssl);
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn bare_public_dirs_get_public_preset_and_project_file_wins() {
+        // api: public/index.php, no framework markers → `public` preset.
+        // site: public/index.html only (static build) → `public` preset.
+        // custom: no index anywhere, but a .reeve.toml → served, preset from file.
+        let base = std::env::temp_dir().join(format!("reeve-park-pub-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("api/public")).unwrap();
+        fs::write(base.join("api/public/index.php"), "<?php").unwrap();
+        fs::create_dir_all(base.join("site/public")).unwrap();
+        fs::write(base.join("site/public/index.html"), "<html>").unwrap();
+        fs::create_dir_all(base.join("custom/dist")).unwrap();
+        fs::write(
+            base.join("custom/.reeve.toml"),
+            "docroot = \"dist\"\npreset = \"grav\"\n",
+        )
+        .unwrap();
+
+        let park = Park {
+            root: base.display().to_string(),
+            server: "apache".into(),
+            php_version: "8.3".into(),
+            tld: "test".into(),
+            ssl: false,
+        };
+        let sites = expand(&park);
+        let names: Vec<&str> = sites.iter().map(|v| v.server_name.as_str()).collect();
+        assert_eq!(names, vec!["api.test", "custom.test", "site.test"]);
+
+        let by = |n: &str| sites.iter().find(|v| v.server_name == n).unwrap();
+        assert_eq!(by("api.test").preset, Framework::Public);
+        let docroot = |n: &str| crate::project::resolve(by(n)).unwrap().docroot;
+        assert_eq!(
+            docroot("api.test"),
+            format!("{}/api/public", base.display())
+        );
+        assert_eq!(by("site.test").preset, Framework::Public);
+        assert_eq!(
+            docroot("site.test"),
+            format!("{}/site/public", base.display())
+        );
+        assert_eq!(by("custom.test").preset, Framework::Grav);
+        let resolved = crate::project::resolve(by("custom.test")).unwrap();
+        assert_eq!(resolved.docroot, format!("{}/custom/dist", base.display()));
 
         let _ = fs::remove_dir_all(&base);
     }

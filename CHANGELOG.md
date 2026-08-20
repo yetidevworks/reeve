@@ -2,6 +2,17 @@
 
 All notable changes to reeve are documented here.
 
+## 0.3.5
+
+### Added
+- **Per-project `.reeve.toml`.** Drop one in a project root to set its `docroot` (any subdir, e.g. `dist`), force a `preset` when auto-detection guesses wrong, and declare `[env]` variables that reach PHP via `getenv()` / `$_SERVER` on every request. It works for parked and declared sites alike, is rendered natively on each backend (Apache `SetEnv`, nginx `fastcgi_param`, Caddy `php_fastcgi { env … }`), and is re-read on every `apply`. Malformed files, parent-escaping docroots, and invalid variable names fail `apply` with an error naming the file; nginx additionally refuses values containing `$`, which it would interpolate and cannot escape. (Closes #4, thanks @frumbert.)
+- **`public` preset.** A generic app served from its `public/` subdir with no framework-specific rewrites — selectable with `--preset public` and in the TUI.
+
+### Fixed
+- **Parked projects with a static `public/` were served from the wrong directory.** A folder whose only index was `public/index.html` (a Vite/Astro/Eleventy build, say) was picked up as a site but served from the project root, so you got a directory listing instead of the page. It now gets the `public` preset; a bare `public/index.php` does too, instead of being labelled `laravel`. (Closes #5, thanks @frumbert.)
+- **`SetEnv` in `.htaccess` no longer 500s on Apache.** reeve's httpd didn't load `mod_env`, so `SetEnv`/`PassEnv`/`UnsetEnv` were "Invalid command" errors. It's now part of the base module set.
+- **Apache now passes the `Authorization` header to PHP-FPM** (`CGIPassAuth On`), matching nginx and Caddy, so bearer-token and Basic-auth APIs work without the `SetEnvIf Authorization` `.htaccess` workaround.
+
 ## 0.3.4
 
 ### Fixed

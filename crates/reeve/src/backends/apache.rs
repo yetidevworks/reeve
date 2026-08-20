@@ -24,6 +24,10 @@ const BASE_MODULES: &[(&str, &str)] = &[
     ("rewrite_module", "mod_rewrite.so"),
     ("headers_module", "mod_headers.so"),
     ("setenvif_module", "mod_setenvif.so"),
+    // SetEnv/PassEnv/UnsetEnv — per-site env vars from `.reeve.toml` and from
+    // a project's own .htaccess (AllowOverride All). Without it a `SetEnv` in
+    // .htaccess is an "Invalid command" and every request 500s.
+    ("env_module", "mod_env.so"),
 ];
 const SSL_MODULES: &[(&str, &str)] = &[
     ("ssl_module", "mod_ssl.so"),
@@ -181,17 +185,29 @@ impl Apache {
                     )
                 })?;
                 let handler = format!("proxy:unix:{}|fcgi://localhost", php.fpm_socket);
-                let docroot = v.effective_docroot();
-                out.push_str(&format!("    DocumentRoot {}\n", q(&docroot)));
-                out.push_str(&format!("    <Directory {}>\n", q(&docroot)));
+                let site = crate::project::resolve(v)?;
+                let docroot = &site.docroot;
+                out.push_str(&format!("    DocumentRoot {}\n", q(docroot)));
+                out.push_str(&format!("    <Directory {}>\n", q(docroot)));
                 out.push_str("        Options Indexes FollowSymLinks\n");
                 out.push_str("        AllowOverride All\n");
                 out.push_str("        Require all granted\n");
+                // Hand the Authorization header to PHP-FPM (bearer tokens, Basic
+                // auth). Apache hides it from CGI/FastCGI by default; nginx and
+                // Caddy pass it through, so this keeps the backends consistent
+                // without the old `SetEnvIf Authorization` .htaccess trick.
+                out.push_str("        CGIPassAuth On\n");
                 out.push_str("    </Directory>\n");
                 out.push_str("    DirectoryIndex index.php index.html\n");
                 out.push_str("    <FilesMatch \\.php$>\n");
                 out.push_str(&format!("        SetHandler {}\n", q(&handler)));
                 out.push_str("    </FilesMatch>\n");
+                // Per-project env from .reeve.toml: mod_proxy_fcgi forwards the
+                // request's subprocess env as FastCGI params, so these land in
+                // getenv() / $_SERVER.
+                for (k, val) in &site.env {
+                    out.push_str(&format!("    SetEnv {k} {}\n", q_value(val)));
+                }
             }
             if v.ssl {
                 let cert = paths::certs_dir()?.join(format!("{}.pem", v.server_name));
@@ -279,6 +295,12 @@ impl Apache {
         }
         Ok(out)
     }
+}
+
+/// Always-quoted Apache config value: httpd's tokenizer only unescapes `\"`
+/// inside a quoted string, so that's the one character that needs escaping.
+fn q_value(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\\\""))
 }
 
 /// Quote an Apache config token if it contains whitespace.
@@ -430,6 +452,31 @@ mod tests {
         let out = Apache::render_conf(&alt, &[&v], &state, &cfg, &brew).unwrap();
         assert!(out.contains("<VirtualHost *:8080>"));
         assert!(out.contains("RewriteRule ^ https://app.test:8443%{REQUEST_URI} [R=301,L]"));
+    }
+
+    #[test]
+    fn project_file_sets_docroot_and_env() {
+        let base = std::env::temp_dir().join(format!("reeve-apache-env-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(
+            base.join(".reeve.toml"),
+            "docroot = \"dist\"\n[env]\nDB_PASS = \"p@ss \\\"word\\\"\"\nDB_USER = \"root\"\n",
+        )
+        .unwrap();
+        let brew = Brew {
+            prefix: "/opt/homebrew".into(),
+        };
+        let state = state_with_php();
+        let cfg = Config::default();
+        let mut v = ssl_vhost();
+        v.docroot = base.display().to_string();
+        let out = Apache::render_conf(&server(), &[&v], &state, &cfg, &brew).unwrap();
+        assert!(out.contains(&format!("DocumentRoot {}/dist\n", base.display())));
+        assert!(out.contains("    SetEnv DB_USER \"root\"\n"));
+        assert!(out.contains("    SetEnv DB_PASS \"p@ss \\\"word\\\"\"\n"));
+        assert!(out.contains("        CGIPassAuth On\n"));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

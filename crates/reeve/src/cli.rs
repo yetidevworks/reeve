@@ -157,7 +157,7 @@ pub enum ServerCommands {
         /// Docroot for the default site. Defaults to the global sites root.
         #[arg(long)]
         root: Option<String>,
-        /// Framework preset for the default site: generic|laravel|wordpress|symfony|grav|drupal.
+        /// Framework preset for the default site: generic|laravel|wordpress|symfony|grav|drupal|public.
         #[arg(long, default_value = "generic")]
         preset: String,
     },
@@ -188,7 +188,7 @@ pub enum VhostCommands {
         server: String,
         #[arg(long)]
         ssl: bool,
-        /// Framework preset: generic|laravel|wordpress|symfony|grav|drupal.
+        /// Framework preset: generic|laravel|wordpress|symfony|grav|drupal|public.
         #[arg(long, default_value = "generic")]
         preset: String,
         /// Make this a reverse proxy to an upstream URL (e.g. http://localhost:5173).

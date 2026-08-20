@@ -12,6 +12,7 @@ mod paths;
 mod php;
 mod preset;
 mod probe;
+mod project;
 mod services;
 mod ssl;
 mod state;

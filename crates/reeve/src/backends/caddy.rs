@@ -58,12 +58,20 @@ impl Caddy {
                         v.php_version
                     )
                 })?;
-                out.push_str(&format!("\troot * {}\n", quote(&v.effective_docroot())));
-                out.push_str(crate::preset::caddy_security(v.preset));
-                out.push_str(&format!(
-                    "\tphp_fastcgi {}\n",
-                    quote(&format!("unix/{}", php.fpm_socket))
-                ));
+                let site = crate::project::resolve(v)?;
+                out.push_str(&format!("\troot * {}\n", quote(&site.docroot)));
+                out.push_str(crate::preset::caddy_security(site.preset));
+                let upstream = quote(&format!("unix/{}", php.fpm_socket));
+                if site.env.is_empty() {
+                    out.push_str(&format!("\tphp_fastcgi {upstream}\n"));
+                } else {
+                    // Per-project env from .reeve.toml, as extra FastCGI params.
+                    out.push_str(&format!("\tphp_fastcgi {upstream} {{\n"));
+                    for (k, val) in &site.env {
+                        out.push_str(&format!("\t\tenv {k} {}\n", quote_value(val)));
+                    }
+                    out.push_str("\t}\n");
+                }
                 out.push_str("\tfile_server\n");
                 out.push_str(&format!(
                     "\trequest_body {{\n\t\tmax_size {}\n\t}}\n",
@@ -150,6 +158,13 @@ fn quote(s: &str) -> String {
     } else {
         s.to_string()
     }
+}
+
+/// Always-quoted Caddyfile value for a `.reeve.toml` env entry. The Caddyfile
+/// lexer unescapes `\"` inside quotes and keeps other backslashes literal, so
+/// the quote is the only character that needs escaping.
+fn quote_value(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\\\""))
 }
 
 impl WebServerBackend for Caddy {
@@ -294,6 +309,40 @@ mod tests {
         assert!(out.contains("php_fastcgi unix//run/php83.sock"));
         // Proxy vhost forwards upstream and emits no PHP for itself.
         assert!(out.contains("reverse_proxy http://localhost:5173"));
+    }
+
+    #[test]
+    fn project_file_env_renders_php_fastcgi_block() {
+        let base = std::env::temp_dir().join(format!("reeve-caddy-env-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(
+            base.join(".reeve.toml"),
+            "docroot = \"dist\"\n[env]\nAPP_ENV = \"local\"\nDB_PASS = \"p@ss \\\"w\\\"\"\n",
+        )
+        .unwrap();
+        let mut state = State::default();
+        state.php_versions.push(PhpVersion {
+            version: "8.3".into(),
+            fpm_socket: "/run/php83.sock".into(),
+            ..Default::default()
+        });
+        let v = Vhost {
+            server_name: "env.test".into(),
+            server: "caddy".into(),
+            docroot: base.display().to_string(),
+            php_version: "8.3".into(),
+            ssl: false,
+            preset: Framework::Generic,
+            proxy_target: None,
+        };
+        let cfg = Config::default();
+        let out = Caddy::render_caddyfile(&server(), &[&v], &state, &cfg).unwrap();
+        assert!(out.contains(&format!("root * {}/dist\n", base.display())));
+        assert!(out.contains("\tphp_fastcgi unix//run/php83.sock {\n"));
+        assert!(out.contains("\t\tenv APP_ENV \"local\"\n"));
+        assert!(out.contains("\t\tenv DB_PASS \"p@ss \\\"w\\\"\"\n"));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

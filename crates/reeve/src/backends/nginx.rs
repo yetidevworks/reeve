@@ -140,15 +140,16 @@ impl Nginx {
                     v.php_version
                 )
             })?;
-            out.push_str(&format!("        root {};\n", q(&v.effective_docroot())));
+            let site = crate::project::resolve(v)?;
+            out.push_str(&format!("        root {};\n", q(&site.docroot)));
             out.push_str("        index index.php index.html;\n");
             // Preset security locations FIRST (nginx takes the first matching
             // regex location), so e.g. /user/accounts/* is denied before the
             // generic PHP handler can run it.
-            out.push_str(crate::preset::nginx_security(v.preset));
+            out.push_str(crate::preset::nginx_security(site.preset));
             out.push_str(&format!(
                 "        location / {{ try_files {}; }}\n",
-                crate::preset::nginx_try_files(v.preset)
+                crate::preset::nginx_try_files(site.preset)
             ));
             out.push_str("        location ~ \\.php$ {\n");
             out.push_str(&format!(
@@ -159,6 +160,13 @@ impl Nginx {
                 "            fastcgi_pass unix:{};\n",
                 php.fpm_socket
             ));
+            // Per-project env from .reeve.toml, as extra FastCGI params.
+            for (k, val) in &site.env {
+                out.push_str(&format!(
+                    "            fastcgi_param {k} {};\n",
+                    env_value(&v.docroot, k, val)?
+                ));
+            }
             out.push_str("        }\n");
             out.push_str("    }\n");
         }
@@ -217,6 +225,26 @@ impl Nginx {
         out.push_str("}\n");
         Ok(out)
     }
+}
+
+/// Quoted nginx string for a `.reeve.toml` env value. nginx interpolates
+/// `$name` inside any string and offers no escape for a literal `$`, so such
+/// values are refused outright rather than silently mangled (a password with
+/// a `$` would otherwise reach PHP wrong, or fail `nginx -t` cryptically).
+fn env_value(project: &str, key: &str, val: &str) -> Result<String> {
+    if val.contains('$') {
+        bail!(
+            "{}/{}: env value for '{key}' contains `$`, which nginx would \
+             interpolate as a variable; nginx has no escape for it, so set \
+             this one another way (e.g. the app's own .env file)",
+            project,
+            crate::project::FILE_NAME
+        );
+    }
+    Ok(format!(
+        "\"{}\"",
+        val.replace('\\', "\\\\").replace('"', "\\\"")
+    ))
 }
 
 /// Quote an nginx token if it contains whitespace.
@@ -366,6 +394,41 @@ mod tests {
         let out = Nginx::render_conf(&alt, &[&v], &state, &cfg, &brew).unwrap();
         assert!(out.contains("listen 2080;"));
         assert!(out.contains("return 301 https://app.test:2443$request_uri;"));
+    }
+
+    #[test]
+    fn project_file_env_renders_fastcgi_params_and_rejects_dollar() {
+        let base = std::env::temp_dir().join(format!("reeve-nginx-env-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(
+            base.join(".reeve.toml"),
+            "docroot = \"dist\"\npreset = \"grav\"\n[env]\nDB_PASS = \"p@ss \\\"w\\\" \\\\\\\\\"\n",
+        )
+        .unwrap();
+        let brew = Brew {
+            prefix: "/opt/homebrew".into(),
+        };
+        let state = state_with_php();
+        let cfg = Config::default();
+        let mut v = ssl_vhost();
+        v.docroot = base.display().to_string();
+        let out = Nginx::render_conf(&server(), &[&v], &state, &cfg, &brew).unwrap();
+        assert!(out.contains(&format!("root {}/dist;\n", base.display())));
+        // Backslash and quote escaped; preset override pulled in Grav's rules.
+        assert!(out.contains("            fastcgi_param DB_PASS \"p@ss \\\"w\\\" \\\\\\\\\";\n"));
+        assert!(out.contains("/user/(accounts|config|env)/"));
+
+        // `$` can't be expressed in an nginx string → clear error naming the file.
+        std::fs::write(base.join(".reeve.toml"), "[env]\nDB_PASS = \"pa$$\"\n").unwrap();
+        let err = Nginx::render_conf(&server(), &[&v], &state, &cfg, &brew)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(".reeve.toml") && err.contains("DB_PASS"),
+            "{err}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
