@@ -665,6 +665,68 @@ fn cmd_vhost(c: VhostCommands) -> Result<()> {
             }
             Ok(())
         }
+        VhostCommands::Show { server_name } => {
+            let state = load_state()?;
+            // Declared vhosts win over parked ones, and `effective_vhosts_for`
+            // already applies that; search every server so the host is found
+            // whichever one serves it.
+            let found = state
+                .servers
+                .iter()
+                .flat_map(|s| park::effective_vhosts_for(&state, &s.name))
+                .find(|v| v.server_name == server_name);
+            let Some(v) = found else {
+                anyhow::bail!(
+                    "Host '{server_name}' isn't served by any server \
+                     (no vhost declared, no parked folder matching it)"
+                );
+            };
+            let declared = state.vhosts.iter().any(|d| d.server_name == server_name);
+            println!("{}", v.server_name);
+            println!(
+                "  server      {} ({})",
+                v.server,
+                if declared {
+                    "declared vhost"
+                } else {
+                    "parked folder"
+                }
+            );
+            if let Some(target) = &v.proxy_target {
+                println!("  proxy       {target}");
+                return Ok(());
+            }
+            let site = project::resolve(&v)?;
+            println!("  php         {}", v.php_version);
+            println!("  ssl         {}", v.ssl);
+            println!("  project     {}", v.docroot);
+            println!("  docroot     {}", site.docroot);
+            println!("  preset      {}", site.preset);
+            match project::source(&v) {
+                Some(path) => println!("  {:<11} {path}", project::FILE_NAME),
+                None => println!(
+                    "  {:<11} none — expected at {}",
+                    project::FILE_NAME,
+                    std::path::Path::new(&v.docroot)
+                        .join(project::FILE_NAME)
+                        .display()
+                ),
+            }
+            if site.env.is_empty() {
+                println!("  env         none");
+            } else {
+                // Names only: these are commonly secrets, and the file is right
+                // there for anyone who wants the values.
+                println!(
+                    "  env         {}",
+                    site.env.keys().cloned().collect::<Vec<_>>().join(", ")
+                );
+            }
+            if let Some(w) = project::misplacement_warning(&v) {
+                println!("⚠ {w}");
+            }
+            Ok(())
+        }
         VhostCommands::Remove { server_name } => {
             let mut state = load_state()?;
             let before = state.vhosts.len();
@@ -822,6 +884,14 @@ fn cmd_apply() -> Result<()> {
         }
         backend.render(server, &vhosts, &state, &cfg, &brew)?;
         backend.validate(server, &brew)?;
+        // A `.reeve.toml` in the served docroot (or in a parked directory) is
+        // never read, and the site keeps working without it — so say so here
+        // rather than let the env silently go missing.
+        for v in &vhosts {
+            if let Some(w) = project::misplacement_warning(v) {
+                println!("⚠ {w}");
+            }
+        }
         if server.enabled {
             let spec = backend.service_spec(server, &brew)?;
             daemon::install(&spec)?;
@@ -839,6 +909,11 @@ fn cmd_apply() -> Result<()> {
             vhosts.len(),
             status
         );
+    }
+    for park in &state.parks {
+        if let Some(w) = project::park_root_warning(&park.root) {
+            println!("⚠ {w}");
+        }
     }
     // Reconcile every PHP-FPM master too: rewrite its plist (so settings like
     // the launchd QoS apply to all versions, not just whichever was last

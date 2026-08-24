@@ -129,6 +129,57 @@ pub fn resolve(v: &Vhost) -> Result<Resolved> {
     })
 }
 
+/// Report a `.reeve.toml` that reeve found but will never read: one sitting in
+/// the *served* docroot (e.g. `public/`) rather than the project root. The file
+/// is looked up beside the project, not beside `index.php`, and a misplaced one
+/// otherwise fails silently — the site serves fine, just without its env.
+pub fn misplacement_warning(v: &Vhost) -> Option<String> {
+    let root = Path::new(&v.docroot);
+    let Ok(resolved) = resolve(v) else {
+        return None;
+    };
+    let served = Path::new(&resolved.docroot);
+    if served == root || !served.join(FILE_NAME).is_file() {
+        return None;
+    }
+    let stray = served.join(FILE_NAME);
+    Some(if root.join(FILE_NAME).is_file() {
+        format!(
+            "{}: ignoring {} — the project root's {} wins",
+            v.server_name,
+            stray.display(),
+            FILE_NAME
+        )
+    } else {
+        format!(
+            "{}: {} is ignored — move it to the project root ({})",
+            v.server_name,
+            stray.display(),
+            root.display()
+        )
+    })
+}
+
+/// Report a `.reeve.toml` dropped in a parked *directory* rather than in one of
+/// the site folders inside it. A park root isn't a project, so the file has no
+/// effect on any site.
+pub fn park_root_warning(park_root: &str) -> Option<String> {
+    let path = Path::new(park_root).join(FILE_NAME);
+    path.is_file().then(|| {
+        format!(
+            "{} applies to nothing — a parked directory isn't a project; \
+             put a {FILE_NAME} in each site folder inside it",
+            path.display()
+        )
+    })
+}
+
+/// Path of the project file backing a vhost, if it has one.
+pub fn source(v: &Vhost) -> Option<String> {
+    let path = Path::new(&v.docroot).join(FILE_NAME);
+    path.is_file().then(|| path.display().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,6 +258,42 @@ mod tests {
                 "error should name the file: {err} (case {c:?})"
             );
         }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn misplaced_file_in_served_docroot_is_reported() {
+        let base = tmp("misplaced");
+        fs::create_dir_all(base.join("public")).unwrap();
+        let v = vhost(&base, Framework::Laravel);
+        // Nothing anywhere: no warning.
+        assert!(misplacement_warning(&v).is_none());
+        // The file in `public/` never takes effect — say so.
+        fs::write(base.join("public").join(FILE_NAME), "[env]\nA = \"1\"\n").unwrap();
+        let w = misplacement_warning(&v).unwrap();
+        assert!(w.contains("is ignored"), "{w}");
+        assert!(w.contains(&base.display().to_string()), "{w}");
+        // With a project-root file too, the warning says which one wins.
+        fs::write(base.join(FILE_NAME), "[env]\nA = \"2\"\n").unwrap();
+        assert!(misplacement_warning(&v).unwrap().contains("wins"));
+        // A project served from its own root can't misplace anything.
+        assert!(misplacement_warning(&vhost(&base, Framework::Generic)).is_none());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn park_root_file_is_reported_and_source_points_at_the_project() {
+        let base = tmp("parkroot");
+        assert!(park_root_warning(&base.display().to_string()).is_none());
+        assert!(source(&vhost(&base, Framework::Generic)).is_none());
+        fs::write(base.join(FILE_NAME), "[env]\nA = \"1\"\n").unwrap();
+        assert!(park_root_warning(&base.display().to_string())
+            .unwrap()
+            .contains("applies to nothing"));
+        assert_eq!(
+            source(&vhost(&base, Framework::Generic)),
+            Some(base.join(FILE_NAME).display().to_string())
+        );
         let _ = fs::remove_dir_all(&base);
     }
 

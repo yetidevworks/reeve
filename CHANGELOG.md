@@ -2,6 +2,14 @@
 
 All notable changes to reeve are documented here.
 
+## 0.3.6
+
+### Added
+- **`reeve vhost show <host>`.** Prints how a host is actually served — which server and whether it came from a declared vhost or a parked folder, the project root, the resolved docroot, preset, PHP version, and the `.reeve.toml` feeding it (with the env names it contributes, or where reeve expected to find the file).
+
+### Fixed
+- **A misplaced `.reeve.toml` is no longer silent.** The file is read from the *project root*, so one dropped in the served docroot (`public/`, `web/`, `dist/`) or in a parked directory did nothing at all — the site kept serving, just without its env. `apply` now warns and names the path it should move to. (Re-opens/closes #4, thanks @frumbert.)
+
 ## 0.3.5
 
 ### Added

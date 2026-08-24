@@ -163,6 +163,12 @@ DB_USER = "root"
 DB_PASS = "secret"
 ```
 
+The file belongs beside the project, **not** inside the directory being served — a `.reeve.toml` in `public/`, `web/`, or `dist/` is never read, and `apply` warns when it finds one there. To see exactly what a host resolves to, including which project file (if any) is feeding it:
+
+```bash
+reeve vhost show app.test
+```
+
 Add it to `.gitignore` if it holds secrets. On Apache, a plain `.htaccess` works too (`AllowOverride All`, with `SetEnv` and `CGIPassAuth` available); nginx can't express a literal `$` in a value, so `apply` refuses such entries with a clear error rather than passing a mangled value to PHP.
 
 One-time DNS + trust setup so `*.test` resolves system-wide and certs are trusted:
@@ -283,6 +289,7 @@ minutes, and survives closing/reopening the view.
 | `server start\|stop\|restart\|list\|remove <name>` | Manage a server (independent) |
 | `vhost add <host> --root <dir> --php <ver> --server <name> [--ssl] [--preset <fw>] [--proxy <url>]` | Add a vhost |
 | `vhost list\|remove <host>` | Manage vhosts |
+| `vhost show <host>` | Show how a host is served: docroot, preset, PHP, and its `.reeve.toml` |
 | `service add\|start\|stop\|restart\|remove\|list <kind>` | Manage databases / redis / memcached / mailpit |
 | `park add <dir> --server <name> --php <ver> [--tld T] [--ssl]` | Auto-serve every subfolder as `<folder>.<tld>` |
 | `park list\|remove <dir>` | Manage parked directories |

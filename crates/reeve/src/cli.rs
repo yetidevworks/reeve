@@ -198,6 +198,12 @@ pub enum VhostCommands {
     },
     /// List vhosts.
     List,
+    /// Show how a host is actually served: docroot, preset, PHP, and the
+    /// `.reeve.toml` (if any) feeding it.
+    Show {
+        /// Hostname, e.g. grav.test
+        server_name: String,
+    },
     /// Remove a vhost.
     Remove { server_name: String },
 }
