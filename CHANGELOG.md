@@ -4,6 +4,9 @@ All notable changes to reeve are documented here.
 
 ## 0.3.10
 
+### Added
+- **The TUI shows reeve's version** in the top-right of the header.
+
 ### Fixed
 - **The dashboard now says when parked folders haven't been applied.** Parked sites are read from disk, so a folder created since the last `apply` appeared in the Parked list while no server was configured to serve it — and on a server with a catch-all default site it answered with the sites root instead of failing, so it looked like it was working. The panel title now reads `[2 not applied — press 'a']` until the config catches up.
 

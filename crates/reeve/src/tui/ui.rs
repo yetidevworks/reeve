@@ -891,7 +891,19 @@ fn render_title(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             Style::default().fg(Color::DarkGray),
         ),
     ]);
+    let used = line.width();
     f.render_widget(Paragraph::new(line), area);
+    // Version in the top-right, drawn as a second pass over the same row so it
+    // stays pinned to the edge whatever the header's width. Dropped rather than
+    // overlapped when the terminal is too narrow to hold both.
+    let version = format!("v{} ", env!("CARGO_PKG_VERSION"));
+    if area.width as usize >= used + version.chars().count() + 2 {
+        f.render_widget(
+            Paragraph::new(Span::styled(version, Style::default().fg(Color::DarkGray)))
+                .alignment(Alignment::Right),
+            area,
+        );
+    }
 }
 
 fn panel_block(title: &str, focused: bool) -> Block<'_> {
