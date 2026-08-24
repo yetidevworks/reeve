@@ -460,6 +460,53 @@ pub fn add_park(root: &str, server: &str, php: &str, tld: &str, ssl: bool) -> Re
     Ok(n)
 }
 
+/// Parked hosts that exist on disk but aren't in any generated config yet.
+///
+/// Parked folders are expanded from the filesystem at render time, so a folder
+/// created since the last `apply` shows up in the dashboard (which reads the
+/// directory live) while nothing is actually serving it. On a server with a
+/// catch-all default site that's especially misleading: the host answers with
+/// the sites root instead of failing, so it looks served.
+///
+/// Every backend writes each host's name into its config verbatim — Apache's
+/// `ServerName`, nginx's `server_name`, Caddy's site address — so searching the
+/// generated files for the name is an accurate, backend-agnostic test without
+/// having to parse any of them.
+pub fn unapplied_parked_hosts(state: &crate::state::State) -> Vec<String> {
+    let parked = crate::park::expand_all(state);
+    if parked.is_empty() {
+        return Vec::new();
+    }
+    let Ok(dir) = crate::paths::generated_dir() else {
+        return Vec::new();
+    };
+    let mut rendered = String::new();
+    let mut stack = vec![dir];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if let Ok(text) = std::fs::read_to_string(&path) {
+                rendered.push_str(&text);
+            }
+        }
+    }
+    // Nothing rendered at all means nothing has been applied; saying every
+    // parked site is unapplied is accurate but useless noise on a fresh setup.
+    if rendered.is_empty() {
+        return Vec::new();
+    }
+    parked
+        .into_iter()
+        .map(|v| v.server_name)
+        .filter(|host| !rendered.contains(host.as_str()))
+        .collect()
+}
+
 /// Stop parking a directory. Errors if it wasn't parked.
 pub fn remove_park(root: &str) -> Result<()> {
     let mut state = load_state()?;

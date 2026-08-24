@@ -1459,11 +1459,21 @@ fn render_parked(f: &mut Frame, app: &App, area: ratatui::layout::Rect) -> usize
         );
     }
     // Show the window position when the list is taller than the panel.
-    let title = if len > view_h {
+    let mut title = if len > view_h {
         format!("Parked  ({len})  [{}–{} of {len}]", off + 1, off + view_h)
     } else {
         format!("Parked  ({len})")
     };
+    // Folders added since the last apply are listed here (the list is read from
+    // disk) but aren't in any server's config, so nothing serves them — and on a
+    // server with a catch-all default site they answer with the sites root
+    // rather than failing, which reads as working. Call them out.
+    if app.parked_unapplied > 0 {
+        title.push_str(&format!(
+            "  [{} not applied — press 'a']",
+            app.parked_unapplied
+        ));
+    }
     f.render_widget(
         Paragraph::new(lines).block(panel_block(&title, focused)),
         area,

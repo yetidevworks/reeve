@@ -95,6 +95,10 @@ pub struct App {
     pub server_status: Vec<crate::ops::ServeState>,
     pub php_status: Vec<Status>,
     pub service_status: Vec<Status>,
+    /// Parked hosts that exist on disk but aren't in any generated config yet —
+    /// folders added since the last apply. Shown in the Parked panel title so
+    /// the dashboard doesn't list sites that nothing is actually serving.
+    pub parked_unapplied: usize,
     /// Parked-directory sites expanded from `state.parks` (read-only, derived).
     pub parked_vhosts: Vec<crate::state::Vhost>,
     pub message: String,
@@ -392,6 +396,7 @@ impl App {
             php_settings: None,
             pending_xdebug: None,
             service_picker: None,
+            parked_unapplied: 0,
             park_modal: None,
             pending_service: None,
             pending_server: None,
@@ -436,6 +441,7 @@ impl App {
             .map(|s| daemon::status(&crate::services::service_id(s.kind)))
             .collect();
         self.parked_vhosts = crate::park::expand_all(&self.state);
+        self.parked_unapplied = crate::ops::unapplied_parked_hosts(&self.state).len();
         self.dns_ok = crate::dns::resolver_ok_all(&self.config.local_tlds);
         let brew = Brew::detect().ok();
         self.health = doctor::summary(&doctor::run(brew.as_ref(), &self.config, &self.state));
