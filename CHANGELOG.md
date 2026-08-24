@@ -2,10 +2,15 @@
 
 All notable changes to reeve are documented here.
 
+## 0.3.8
+
+### Fixed
+- **Linux browsers now actually trust the local CA.** On Linux the system trust store and the browser trust store are different things: `mkcert -install` added the CA to the system anchors — so `curl` verified and `doctor` passed — but Chromium and Firefox read an NSS database that mkcert only touches if it already exists, which on a fresh machine it doesn't. `ssl trust` now creates that database first, `doctor` reports the browser store separately when it's missing the CA, and both remind you that a running browser has to be fully quit before it picks the CA up.
+- **A stopped server no longer looks like everything is fine.** `apply` printed a tick and `[stopped]`, `doctor` passed it as healthy, and the TUI's `a` skipped it entirely and said "applied 0 server(s)" — so a correctly configured site just refused connections with nothing anywhere saying why. All three now name the server and the command that starts it, and `apply` renders a stopped server's config so it's current when it does start.
+
 ## 0.3.7
 
 ### Fixed
-- **A stopped server no longer looks like everything is fine.** `apply` printed a tick and `[stopped]`, `doctor` passed it as healthy, and the TUI's `a` skipped it entirely and said "applied 0 server(s)" — so a correctly configured site just refused connections with nothing anywhere saying why. All three now name the server and the command that starts it, and `apply` renders a stopped server's config so it's current when it does start.
 - **TUI columns no longer drift on long hostnames.** The Vhosts and Parked panels padded the address to a fixed 30 columns, so anything longer pushed that row's `server`, `php` and `path` right and left the lists looking ragged. The address column is now sized to the widest address across both panels — capped so one outlier can't squeeze the path, and shortened with an ellipsis when it has to be (the link still opens the full address).
 
 ## 0.3.6

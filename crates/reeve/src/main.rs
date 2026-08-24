@@ -982,6 +982,10 @@ fn cmd_ssl(c: SslCommands) -> Result<()> {
                 println!(
                     "✓ mkcert local CA installed into the trust store — local HTTPS is now trusted"
                 );
+                // Browsers read the store once at launch, so a running one keeps
+                // showing "Not secure" until it is fully quit — closing the last
+                // window often isn't enough.
+                println!("  ↪ fully quit and reopen your browser for it to take effect");
             } else {
                 println!("✓ mkcert local CA was already trusted — local HTTPS works");
             }

@@ -178,6 +178,8 @@ reeve dns setup            # installs dnsmasq + wires the system resolver
 reeve ssl trust            # install the mkcert CA into your trust store (once)
 ```
 
+`ssl trust` covers both stores a Linux box keeps — the system anchors that `curl` reads and the NSS database that Chromium and Firefox read, creating the latter if the machine doesn't have one yet. A browser reads that store at launch, so quit it fully (not just the last window) before expecting the padlock; `reeve doctor` warns if the CA hasn't reached the browser store.
+
 `dns setup` points the system resolver at reeve's dnsmasq for each TLD. On macOS
 it writes the root-owned `/etc/resolver/<tld>` files via the native admin dialog
 — no manual `sudo`. On Linux it writes a systemd-resolved drop-in via `sudo`. In

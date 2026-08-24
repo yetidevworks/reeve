@@ -268,11 +268,26 @@ pub fn run(brew: Option<&Brew>, cfg: &Config, state: &State) -> Vec<Check> {
         .unwrap_or(false);
     let trusted = brew.map(ssl::is_trusted).unwrap_or(false);
     match (generated, trusted) {
-        (_, true) => checks.push(Check::new(
-            "SSL CA",
-            Health::Ok,
-            "mkcert root trusted (local HTTPS works)".to_string(),
-        )),
+        (_, true) => {
+            checks.push(Check::new(
+                "SSL CA",
+                Health::Ok,
+                "mkcert root trusted (local HTTPS works)".to_string(),
+            ));
+            // On Linux, browsers read an NSS database rather than the system
+            // anchors, so curl can verify happily while Chromium still says
+            // "Not secure". Report the two stores separately.
+            #[cfg(target_os = "linux")]
+            if !ssl::is_browser_trusted() {
+                checks.push(Check::new(
+                    "SSL browsers",
+                    Health::Warn,
+                    "CA missing from the browser (NSS) store — run `reeve ssl trust`, \
+                     then fully quit and reopen the browser"
+                        .to_string(),
+                ));
+            }
+        }
         (true, false) => checks.push(Check::new(
             "SSL CA",
             Health::Warn,

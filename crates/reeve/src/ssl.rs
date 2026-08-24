@@ -56,6 +56,62 @@ pub fn ca_cert(brew: &Brew) -> Result<PathBuf> {
     Ok(caroot(brew)?.join("rootCA.pem"))
 }
 
+/// Chromium's own certificate store on Linux — separate from the system trust
+/// store, and the one browsers actually read.
+#[cfg(target_os = "linux")]
+fn nssdb_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".pki/nssdb"))
+}
+
+/// Create Chromium's NSS database if it doesn't exist yet, so `mkcert -install`
+/// has somewhere to put the CA.
+///
+/// On Linux the system trust store and the browser trust store are different
+/// things: `mkcert -install` adds the CA to the system anchors (which is what
+/// curl and `openssl verify` see), but Chromium and Firefox read an NSS
+/// database instead. mkcert only touches that database if it already exists,
+/// and it exists only once the browser has been run — so on a fresh machine
+/// `ssl trust` reports success, `doctor` passes, and the browser still says
+/// "Not secure". Creating the empty database first closes that gap.
+///
+/// Best-effort: without `certutil` (the `nss` / `libnss3-tools` package) there
+/// is nothing to create it with, and `trust_hint()` already says so.
+#[cfg(target_os = "linux")]
+fn ensure_nssdb() {
+    let Some(db) = nssdb_dir() else {
+        return;
+    };
+    if db.join("cert9.db").exists() || db.join("cert8.db").exists() {
+        return;
+    }
+    if std::fs::create_dir_all(&db).is_err() {
+        return;
+    }
+    let _ = Command::new("certutil")
+        .args(["-d", &format!("sql:{}", db.display())])
+        .args(["-N", "--empty-password"])
+        .output();
+}
+
+#[cfg(not(target_os = "linux"))]
+fn ensure_nssdb() {}
+
+/// Whether the CA is in the store browsers actually read. On Linux that's the
+/// NSS database, not the system anchors — see `ensure_nssdb`. Elsewhere the
+/// system trust store is the browser trust store, so this matches `is_trusted`.
+#[cfg(target_os = "linux")]
+pub fn is_browser_trusted() -> bool {
+    let Some(db) = nssdb_dir() else {
+        return false;
+    };
+    Command::new("certutil")
+        .args(["-d", &format!("sql:{}", db.display())])
+        .arg("-L")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("mkcert development CA"))
+        .unwrap_or(false)
+}
+
 /// Ensure mkcert's local CA exists and is installed into the trust store.
 /// `mkcert -install` is idempotent; on macOS the first run may prompt for
 /// admin authorization to add the root to the System keychain. Output is
@@ -64,6 +120,8 @@ pub fn ca_cert(brew: &Brew) -> Result<PathBuf> {
 /// present in the trust store.
 pub fn ensure_ca(brew: &Brew) -> Result<bool> {
     ensure_installed(brew)?;
+    // Give mkcert a browser store to install into before asking it to install.
+    ensure_nssdb();
     let out = Command::new(mkcert_bin(brew))
         .arg("-install")
         .output()
@@ -81,8 +139,12 @@ pub fn ensure_ca(brew: &Brew) -> Result<bool> {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    // mkcert says "already installed" when nothing changed.
-    Ok(!combined.contains("already installed"))
+    // mkcert reports each store it touched: "is now installed" when it added
+    // the CA, "is already installed" when it didn't. On Linux there are two
+    // stores (system anchors and the browser's NSS database), so testing for
+    // the negative would call it unchanged whenever either one was already
+    // done — including the run that just added it to the browser.
+    Ok(combined.contains("now installed"))
 }
 
 /// Remove the mkcert local CA from the trust store (`mkcert -uninstall`). Leaves
