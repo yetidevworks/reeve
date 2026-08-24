@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/reeve"]
 
 [workspace.package]
-version = "0.3.5"
+version = "0.3.6"
 edition = "2021"
 license = "MIT"
 authors = ["Andy Miller <andy@trilbymedia.com>"]
