@@ -1252,14 +1252,16 @@ pub fn vhost_url(app: &App, vhost: &crate::state::Vhost) -> String {
 
 /// Record a clickable URL region for a vhost/parked row so it can be stamped as
 /// an OSC 8 hyperlink after the draw. `row` is the visible (0-based) index of the
-/// line within the panel. The link text begins after the panel's 1-cell border
-/// and the 3-char row prefix (`" › "`), and is clipped to the panel's inner width
-/// so it never overruns into the neighbouring columns — but `url` stays whole so
-/// a click still opens the full address even when the visible text is truncated.
+/// line within the panel, and `shown` is the text actually drawn (already fitted
+/// to the address column). The link begins after the panel's 1-cell border and
+/// the 3-char row prefix (`" › "`), and is clipped to the panel's inner width so
+/// it never overruns into the neighbouring columns — but `url` stays whole so a
+/// click still opens the full address even when the visible text is shortened.
 fn record_link(
     app: &App,
     area: ratatui::layout::Rect,
     row: usize,
+    shown: &str,
     url: String,
     sel: bool,
     focused: bool,
@@ -1271,7 +1273,7 @@ fn record_link(
         return;
     }
     let avail = (last_inner - x + 1) as usize;
-    let text: String = url.chars().take(avail).collect();
+    let text: String = shown.chars().take(avail).collect();
     if text.is_empty() {
         return;
     }
@@ -1283,6 +1285,53 @@ fn record_link(
         reversed: sel && focused,
         bold: sel && !focused,
     });
+}
+
+/// Shorten `s` to `w` columns, marking the cut with an ellipsis.
+fn ellipsize(s: &str, w: usize) -> String {
+    if s.chars().count() <= w {
+        return s.to_string();
+    }
+    if w == 0 {
+        return String::new();
+    }
+    let mut out: String = s.chars().take(w - 1).collect();
+    out.push('…');
+    out
+}
+
+/// Width of the address column shared by the Vhosts and Parked panels, sized to
+/// the widest address across both lists so every row's `server`/`php`/`path`
+/// starts at the same column. A fixed width instead let any longer host shove
+/// the rest of its row right, which is what put the columns out of step. Capped
+/// so one outlier hostname can't squeeze the path column, and floored at the
+/// width the panels have always used so a short list still looks the same.
+fn url_col_width(app: &App, area_w: u16) -> usize {
+    const MIN: usize = 30;
+    const MAX: usize = 46;
+    // Row prefix, the server and php columns, their separators, and enough left
+    // over for a useful slice of the path.
+    const OVERHEAD: usize = 3 + 1 + 8 + 1 + 5 + 1 + 20;
+    let room = (area_w.saturating_sub(2) as usize).saturating_sub(OVERHEAD);
+    let widest = app
+        .state
+        .vhosts
+        .iter()
+        .map(|v| vhost_url(app, v).chars().count())
+        .chain(
+            app.parked_vhosts
+                .iter()
+                .map(|v| parked_url(v).chars().count()),
+        )
+        .max()
+        .unwrap_or(0);
+    widest.clamp(MIN, MAX.min(room.max(MIN)))
+}
+
+/// The address a parked folder is reachable at.
+fn parked_url(v: &crate::state::Vhost) -> String {
+    let scheme = if v.ssl { "https" } else { "http" };
+    format!("{scheme}://{}", v.server_name)
 }
 
 /// First visible row index for a list of `len` rows in a `view_h`-tall panel,
@@ -1304,6 +1353,7 @@ fn render_vhosts(f: &mut Frame, app: &App, area: ratatui::layout::Rect) -> usize
     let view_h = area.height.saturating_sub(2) as usize;
     let len = app.state.vhosts.len();
     let off = window_offset(app.sel_vhost, len, view_h);
+    let url_w = url_col_width(app, area.width);
     let mut lines: Vec<Line> = Vec::new();
     if len == 0 {
         lines.push(Line::from(Span::styled(
@@ -1314,17 +1364,18 @@ fn render_vhosts(f: &mut Frame, app: &App, area: ratatui::layout::Rect) -> usize
     for (i, v) in app.state.vhosts.iter().enumerate().skip(off).take(view_h) {
         let sel = i == app.sel_vhost;
         let url = vhost_url(app, v);
+        let shown = ellipsize(&url, url_w);
         // Recorded as an OSC 8 hyperlink (stamped after draw) so the URL is
         // click-to-open in capable terminals, not just auto-linkified text.
-        record_link(app, area, i - off, url.clone(), sel, focused);
-        // Underline only the URL itself (not the padding to col 30), so it lines
-        // up with the terminal's own OSC 8 hyperlink underline.
-        let pad = 30usize.saturating_sub(url.chars().count());
+        record_link(app, area, i - off, &shown, url, sel, focused);
+        // Underline only the address itself, not the padding out to the column
+        // width, so it lines up with the terminal's own OSC 8 underline.
+        let pad = url_w.saturating_sub(shown.chars().count());
         lines.push(
             Line::from(vec![
                 Span::raw(format!(" {} ", if sel && focused { "›" } else { " " })),
                 Span::styled(
-                    url.clone(),
+                    shown,
                     Style::default()
                         .fg(ACCENT)
                         .add_modifier(Modifier::UNDERLINED),
@@ -1362,6 +1413,7 @@ fn render_parked(f: &mut Frame, app: &App, area: ratatui::layout::Rect) -> usize
     let view_h = area.height.saturating_sub(2) as usize;
     let len = app.parked_vhosts.len();
     let off = window_offset(app.sel_parked, len, view_h);
+    let url_w = url_col_width(app, area.width);
     let mut lines: Vec<Line> = Vec::new();
     if len == 0 {
         lines.push(Line::from(Span::styled(
@@ -1371,15 +1423,15 @@ fn render_parked(f: &mut Frame, app: &App, area: ratatui::layout::Rect) -> usize
     }
     for (i, v) in app.parked_vhosts.iter().enumerate().skip(off).take(view_h) {
         let sel = i == app.sel_parked;
-        let scheme = if v.ssl { "https" } else { "http" };
-        let url = format!("{scheme}://{}", v.server_name);
-        record_link(app, area, i - off, url.clone(), sel, focused);
-        let pad = 30usize.saturating_sub(url.chars().count());
+        let url = parked_url(v);
+        let shown = ellipsize(&url, url_w);
+        record_link(app, area, i - off, &shown, url, sel, focused);
+        let pad = url_w.saturating_sub(shown.chars().count());
         lines.push(
             Line::from(vec![
                 Span::raw(format!(" {} ", if sel && focused { "›" } else { " " })),
                 Span::styled(
-                    url.clone(),
+                    shown,
                     Style::default()
                         .fg(ACCENT)
                         .add_modifier(Modifier::UNDERLINED),
@@ -1417,4 +1469,20 @@ fn render_status(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .alignment(Alignment::Left),
         area,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ellipsize;
+
+    #[test]
+    fn ellipsize_only_shortens_what_overruns() {
+        assert_eq!(ellipsize("https://short.test", 30), "https://short.test");
+        assert_eq!(ellipsize("abcdef", 6), "abcdef");
+        assert_eq!(ellipsize("abcdef", 5), "abcd…");
+        assert_eq!(ellipsize("abcdef", 1), "…");
+        assert_eq!(ellipsize("abcdef", 0), "");
+        // Column width is in characters, so multi-byte hosts don't over-cut.
+        assert_eq!(ellipsize("héllo-wörld", 6).chars().count(), 6);
+    }
 }

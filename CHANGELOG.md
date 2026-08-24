@@ -2,6 +2,11 @@
 
 All notable changes to reeve are documented here.
 
+## 0.3.7
+
+### Fixed
+- **TUI columns no longer drift on long hostnames.** The Vhosts and Parked panels padded the address to a fixed 30 columns, so anything longer pushed that row's `server`, `php` and `path` right and left the lists looking ragged. The address column is now sized to the widest address across both panels — capped so one outlier can't squeeze the path, and shortened with an ellipsis when it has to be (the link still opens the full address).
+
 ## 0.3.6
 
 ### Added
