@@ -902,13 +902,28 @@ fn cmd_apply() -> Result<()> {
         } else {
             "stopped"
         };
+        // Rendering a config for a server that isn't running looks like success
+        // but serves nothing — every site on it refuses the connection. Say so,
+        // with the command that fixes it, rather than a bare tick.
+        let running = status == "running";
         println!(
-            "✓ {} ({}) — {} vhost(s) [{}]",
+            "{} {} ({}) — {} vhost(s) [{}]",
+            if running || vhosts.is_empty() {
+                "✓"
+            } else {
+                "⚠"
+            },
             server.name,
             server.backend,
             vhosts.len(),
             status
         );
+        if !running && !vhosts.is_empty() {
+            println!(
+                "  ↪ config written, but nothing is serving it — `reeve server start {}`",
+                server.name
+            );
+        }
     }
     for park in &state.parks {
         if let Some(w) = project::park_root_warning(&park.root) {

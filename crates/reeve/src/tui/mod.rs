@@ -969,7 +969,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             }
             Panel::Php => restart_selected_fpm(app),
             Panel::Vhosts | Panel::Parked => {
-                let r = apply_all().map(|n| format!("applied {n} server(s)"));
+                let r = apply_all();
                 app.act("restart", r);
             }
             Panel::Services => {
@@ -981,7 +981,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             }
         },
         KeyCode::Char('a') => {
-            let r = apply_all().map(|n| format!("applied {n} server(s)"));
+            let r = apply_all();
             app.act("apply", r);
         }
         KeyCode::Char('n') => match app.focus {
@@ -2438,7 +2438,7 @@ fn submit_wizard(app: &mut App) {
             // Auto-apply: re-render + restart the running servers so the change
             // takes effect immediately, instead of asking the user to do it.
             let tail = match apply_all() {
-                Ok(n) => format!("— applied to {n} server(s)"),
+                Ok(msg) => format!("— {msg}"),
                 Err(e) => format!("— saved, but apply failed: {e}"),
             };
             app.message = format!("✓ {verb} vhost '{name}' on '{server}' ({how}) {tail}");
@@ -2448,15 +2448,33 @@ fn submit_wizard(app: &mut App) {
     }
 }
 
-/// Re-render + restart every enabled server.
-fn apply_all() -> Result<usize> {
+/// Re-render + restart every enabled server, and re-render the stopped ones so
+/// their config is current whenever they are started. Returns the status line to
+/// show: a stopped server that has sites is why those sites refuse connections,
+/// so it gets named rather than silently skipped.
+fn apply_all() -> Result<String> {
     let state = load_state()?;
     let mut n = 0;
-    for server in state.servers.iter().filter(|s| s.enabled) {
-        ops::restart_server(&server.name)?;
-        n += 1;
+    let mut idle: Vec<&str> = Vec::new();
+    for server in &state.servers {
+        if server.enabled {
+            ops::restart_server(&server.name)?;
+            n += 1;
+        } else {
+            ops::render_server(server)?;
+            if !crate::park::effective_vhosts_for(&state, &server.name).is_empty() {
+                idle.push(&server.name);
+            }
+        }
     }
-    Ok(n)
+    Ok(if idle.is_empty() {
+        format!("applied {n} server(s)")
+    } else {
+        format!(
+            "applied {n} server(s) — {} stopped, its sites won't answer until you start it (enter)",
+            idle.join(", ")
+        )
+    })
 }
 
 /// Suspend the TUI, run a (slow) PHP install with visible brew output, wait for

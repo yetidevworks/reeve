@@ -109,7 +109,24 @@ pub fn run(brew: Option<&Brew>, cfg: &Config, state: &State) -> Vec<Check> {
                 };
                 (Health::Ok, format!("running on {list}"))
             }
-            ServeState::Stopped => (Health::Ok, "stopped".to_string()),
+            // A stopped server with sites pointing at it is why they refuse
+            // connections, so don't pass it as healthy — it's the whole reason
+            // someone is running `doctor`. With nothing to serve, stopped is
+            // simply idle.
+            ServeState::Stopped => {
+                if crate::park::effective_vhosts_for(state, &s.name).is_empty() {
+                    (Health::Ok, "stopped (no sites)".to_string())
+                } else {
+                    (
+                        Health::Warn,
+                        format!(
+                            "stopped — its sites won't answer until you run \
+                             `reeve server start {}` (TUI: enter)",
+                            s.name
+                        ),
+                    )
+                }
+            }
             ServeState::LoadedNotBound => (
                 Health::Fail,
                 format!(
