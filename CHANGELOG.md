@@ -2,6 +2,12 @@
 
 All notable changes to reeve are documented here.
 
+## 0.3.9
+
+### Fixed
+- **Park changes now take effect when you make them.** Adding, editing or removing a park only wrote state — the servers kept serving the old settings until the next `apply`. Since the dashboard reads the new settings straight from state, a park re-pointed at PHP 8.5 showed 8.5 everywhere while the sites were still being served with 8.3. Both the TUI and `reeve park add` / `park remove` now apply straight after the change.
+- **The park manager shows the park you're looking at.** Its form was always seeded from `sites_root` and the default PHP, so "manage parks" listed `~/webapps → *.test (caddy, 8.5)` while the form under it offered `~/Sites` and 8.3 — and submitting parked a second directory instead of editing the first. It now loads the selected park's settings (following the list as you move through it), labels itself "Edit this park", and keeps that park's TLD instead of silently rewriting it to the first configured one.
+
 ## 0.3.8
 
 ### Fixed

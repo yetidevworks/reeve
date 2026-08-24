@@ -1259,6 +1259,34 @@ fn open_new_server(app: &mut App) {
 
 /// Open the park manager (list existing parks + add form). Needs a server and
 /// a PHP version to point parked sites at.
+/// Load an existing park's settings into the modal's form. "Manage parks" is
+/// also how a park is edited — re-parking the same directory replaces it — so
+/// the form has to show what that park is actually configured with. Seeded from
+/// `sites_root` instead, it showed a directory and PHP version the user had
+/// never chosen, and submitting would quietly park a second directory.
+fn seed_park_form(app: &mut App, idx: usize) {
+    let Some(park) = app.state.parks.get(idx).cloned() else {
+        return;
+    };
+    let server_idx = app.state.servers.iter().position(|s| s.name == park.server);
+    let php_idx = app
+        .state
+        .php_versions
+        .iter()
+        .position(|p| p.version == park.php_version);
+    let Some(m) = app.park_modal.as_mut() else {
+        return;
+    };
+    m.dir = park.root;
+    m.ssl = park.ssl;
+    if let Some(i) = server_idx {
+        m.server_idx = i;
+    }
+    if let Some(i) = php_idx {
+        m.php_idx = i;
+    }
+}
+
 fn open_park_modal(app: &mut App) {
     if app.state.servers.is_empty() {
         app.message = "Add a server first: `reeve server add caddy`".into();
@@ -1268,15 +1296,22 @@ fn open_park_modal(app: &mut App) {
         app.message = "Install a PHP version first: `reeve php install 8.3`".into();
         return;
     }
+    let has_parks = !app.state.parks.is_empty();
     app.park_modal = Some(ParkModal {
         dir: format!("{}/", app.config.sites_root.trim_end_matches('/')),
         server_idx: app.sel_server.min(app.state.servers.len() - 1),
         php_idx: app.sel_php.min(app.state.php_versions.len() - 1),
         ssl: false,
         sel_park: 0,
-        field: 1,
+        // With parks already set up, open on the list (field 0) with the first
+        // one loaded into the form, so ↑↓ picks which park to edit; otherwise
+        // go straight to the empty add form's first field.
+        field: usize::from(!has_parks),
         error: None,
     });
+    if has_parks {
+        seed_park_form(app, 0);
+    }
 }
 
 fn handle_park_key(app: &mut App, code: KeyCode) {
@@ -1299,14 +1334,24 @@ fn handle_park_key(app: &mut App, code: KeyCode) {
         KeyCode::Tab => m.field = (m.field + 1) % PARK_FIELDS,
         KeyCode::BackTab => m.field = (m.field + PARK_FIELDS - 1) % PARK_FIELDS,
         // Field 0 is the existing-parks list: ↑↓ select, del removes.
-        KeyCode::Up if m.field == 0 => m.sel_park = m.sel_park.saturating_sub(1),
+        KeyCode::Up if m.field == 0 => {
+            m.sel_park = m.sel_park.saturating_sub(1);
+            let i = m.sel_park;
+            seed_park_form(app, i);
+        }
         KeyCode::Down if m.field == 0 => {
-            m.sel_park = (m.sel_park + 1).min(park_count.saturating_sub(1))
+            m.sel_park = (m.sel_park + 1).min(park_count.saturating_sub(1));
+            let i = m.sel_park;
+            seed_park_form(app, i);
         }
         KeyCode::Delete | KeyCode::Backspace if m.field == 0 => {
             if let Some(p) = app.state.parks.get(m.sel_park) {
                 let root = p.root.clone();
-                let r = ops::remove_park(&root).map(|_| format!("unparked {root}"));
+                // Auto-apply too, so the sites stop being served right away
+                // rather than lingering until the next apply.
+                let r = ops::remove_park(&root)
+                    .and_then(|()| apply_all())
+                    .map(|msg| format!("unparked {root} — {msg}"));
                 app.act("unpark", r);
             }
         }
@@ -1340,11 +1385,16 @@ fn submit_park(app: &mut App) {
         .get(m.php_idx)
         .map(|p| p.version.clone());
     let ssl = m.ssl;
+    // Editing an existing park keeps its TLD: the form has no TLD field, so
+    // defaulting to the first configured one would silently move every site in
+    // a `--tld lan` park over to `.test`.
     let tld = app
-        .config
-        .local_tlds
-        .first()
-        .cloned()
+        .state
+        .parks
+        .iter()
+        .find(|p| p.root == dir)
+        .map(|p| p.tld.clone())
+        .or_else(|| app.config.local_tlds.first().cloned())
         .unwrap_or_else(|| "test".into());
 
     let (Some(server), Some(php)) = (server, php) else {
@@ -1356,7 +1406,16 @@ fn submit_park(app: &mut App) {
     match ops::add_park(&dir, &server, &php, &tld, ssl) {
         Ok(n) => {
             app.park_modal = None;
-            app.message = format!("✓ parked {dir} → *.{tld} ({n} site(s)) — press 'a' to apply");
+            // Auto-apply, matching vhost add/edit. The parked list is derived
+            // from state, so it shows the new PHP version (or server, or TLD)
+            // the moment the park is saved — while the running server carries
+            // on serving the old one until it is re-rendered. Leaving that to a
+            // separate keypress means the dashboard and the sites disagree.
+            let tail = match apply_all() {
+                Ok(msg) => format!("— {msg}"),
+                Err(e) => format!("— saved, but apply failed: {e}"),
+            };
+            app.message = format!("✓ parked {dir} → *.{tld} ({n} site(s)) {tail}");
             app.refresh();
         }
         Err(e) => {

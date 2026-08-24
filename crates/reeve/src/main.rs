@@ -820,14 +820,20 @@ fn cmd_park(c: ParkCommands) -> Result<()> {
             let tld = tld.unwrap_or_else(|| cfg.local_tlds[0].clone());
             let n = ops::add_park(&root, &server, &php, &tld, ssl)?;
             println!("✓ Parked {root} → *.{tld} ({n} site(s) found)");
-            println!("  Run `reeve apply` to render and reload.");
-            Ok(())
+            // Apply straight away. A park isn't one site you might still be
+            // setting up (as `vhost add` often is) — it changes how a whole
+            // directory of existing sites is served, and re-parking is how you
+            // change their PHP version or server. Leaving that to a separate
+            // step means `park list` reports the new settings while the sites
+            // are still served with the old ones.
+            cmd_apply()
         }
         ParkCommands::Remove { dir } => {
             let root = expand_tilde(&dir);
             ops::remove_park(&root)?;
-            println!("✓ Unparked {root} — run `reeve apply` to drop its sites");
-            Ok(())
+            println!("✓ Unparked {root}");
+            // Apply so its sites stop being served now, not later.
+            cmd_apply()
         }
         ParkCommands::List => {
             let state = load_state()?;

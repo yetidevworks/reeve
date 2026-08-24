@@ -1121,8 +1121,15 @@ fn render_park_modal(f: &mut Frame, app: &App) {
         )));
     }
     lines.push(Line::raw(""));
+    // The same form adds and edits: re-parking a directory replaces its entry,
+    // so say which one it's about to do rather than always claiming "add".
+    let editing = parks.iter().any(|p| p.root == m.dir.trim());
     lines.push(Line::from(Span::styled(
-        "  Add a park:",
+        if editing {
+            "  Edit this park:"
+        } else {
+            "  Add a park:"
+        },
         Style::default().add_modifier(Modifier::BOLD),
     )));
     lines.push(field_line(1, "Dir:", cursor(&m.dir, m.field == 1)));
@@ -1144,7 +1151,11 @@ fn render_park_modal(f: &mut Frame, app: &App) {
         )));
     }
     lines.push(Line::from(Span::styled(
-        "  tab field · ←→/space change · enter add · esc close",
+        if editing {
+            "  tab field · ←→/space change · enter save · esc close"
+        } else {
+            "  tab field · ←→/space change · enter add · esc close"
+        },
         Style::default().fg(Color::DarkGray),
     )));
 
