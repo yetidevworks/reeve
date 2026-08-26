@@ -552,7 +552,9 @@ fn cmd_server(c: ServerCommands) -> Result<()> {
                 enabled: false,
                 default_site,
                 default_preset,
-                default_root: root.filter(|r| !r.trim().is_empty()),
+                default_root: root
+                    .filter(|r| !r.trim().is_empty())
+                    .map(|r| expand_tilde(r.trim())),
                 settings: Default::default(),
             })?;
             save_state(&state)?;
@@ -862,12 +864,7 @@ fn cmd_park(c: ParkCommands) -> Result<()> {
 
 /// Expand a leading `~` to the user's home directory.
 fn expand_tilde(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest).display().to_string();
-        }
-    }
-    path.to_string()
+    state::expand_tilde(path)
 }
 
 fn cmd_apply() -> Result<()> {

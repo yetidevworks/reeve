@@ -985,7 +985,7 @@ fn render_servers(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         if s.default_site {
             let root = s.effective_default_root(&app.config.sites_root);
             spans.push(Span::styled(
-                format!("   {}", app.anon(root)),
+                format!("   {}", app.anon(&root)),
                 Style::default().fg(Color::DarkGray),
             ));
         }

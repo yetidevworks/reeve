@@ -2,6 +2,13 @@
 
 All notable changes to reeve are documented here.
 
+## 1.0.0
+
+First stable release. reeve has been in daily use driving a real multi-site, multi-PHP workspace since 0.1, and the CLI, `state.toml` and `config.toml` formats are now considered stable — they'll follow semver from here.
+
+### Fixed
+- **A default root typed with `~` now serves the directory you meant.** A server's default-site root was written into the generated config verbatim, but no backend expands a tilde itself — so `~/workspace/my-site` was resolved relative to the server's working directory and every request came back 404 while the dashboard cheerfully listed the correct path. Docroots are expanded to an absolute path before they reach Caddy, Apache or nginx, and are stored expanded when set from the TUI or `reeve server add --root`.
+
 ## 0.3.10
 
 ### Added

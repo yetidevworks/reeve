@@ -1432,14 +1432,9 @@ fn submit_park(app: &mut App) {
     }
 }
 
-/// Expand a leading `~` to the home directory (TUI-side copy).
+/// Expand a leading `~` to the home directory.
 fn expand_tilde_tui(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest).display().to_string();
-        }
-    }
-    path.to_string()
+    crate::state::expand_tilde(path)
 }
 
 /// Derive a unique instance name from the backend (caddy, caddy2, caddy3, …).
@@ -1511,7 +1506,7 @@ fn submit_server_wizard(app: &mut App) {
     let default_preset = crate::state::Framework::all()[w.preset_idx];
     let default_root = {
         let r = w.default_root.trim();
-        (!r.is_empty()).then(|| r.to_string())
+        (!r.is_empty()).then(|| expand_tilde_tui(r))
     };
     let http: Result<u16, _> = w.http.parse();
     let https: Result<u16, _> = w.https.parse();

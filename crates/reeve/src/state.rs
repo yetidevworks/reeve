@@ -92,12 +92,16 @@ impl Server {
     }
 
     /// The default site's docroot: this server's override, else the global
-    /// sites root. Trailing slash trimmed. Only used when `default_site` is on.
-    pub fn effective_default_root<'a>(&'a self, sites_root: &'a str) -> &'a str {
-        self.default_root
-            .as_deref()
-            .unwrap_or(sites_root)
-            .trim_end_matches('/')
+    /// sites root. Trailing slash trimmed and a leading `~` expanded, since
+    /// none of the backends understand a tilde in a docroot. Only used when
+    /// `default_site` is on.
+    pub fn effective_default_root(&self, sites_root: &str) -> String {
+        expand_tilde(
+            self.default_root
+                .as_deref()
+                .unwrap_or(sites_root)
+                .trim_end_matches('/'),
+        )
     }
 }
 
@@ -294,6 +298,24 @@ impl FromStr for Framework {
             ),
         }
     }
+}
+
+/// Expand a leading `~`/`~/` to the user's home directory. Docroots are typed
+/// by hand in the TUI and on the CLI, but no web server backend expands a
+/// tilde itself — an unexpanded `~/...` root is resolved relative to the
+/// server's working directory and every request 404s.
+pub fn expand_tilde(path: &str) -> String {
+    if path == "~" {
+        if let Some(home) = dirs::home_dir() {
+            return home.display().to_string();
+        }
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest).display().to_string();
+        }
+    }
+    path.to_string()
 }
 
 /// `root/sub`, or just `root` when `sub` is empty. Tolerates a trailing slash
@@ -555,6 +577,29 @@ mod tests {
         // Override wins, also trimmed.
         s.default_root = Some("/var/www/".into());
         assert_eq!(s.effective_default_root("/Sites"), "/var/www");
+    }
+
+    #[test]
+    fn default_root_expands_a_leading_tilde() {
+        let home = dirs::home_dir().unwrap().display().to_string();
+        let mut s = server("a", 80, 443);
+        // No backend expands `~` itself, so it must never reach a docroot.
+        s.default_root = Some("~/workspace/site/".into());
+        assert_eq!(
+            s.effective_default_root("/Sites"),
+            format!("{home}/workspace/site")
+        );
+        // A bare `~` is the home directory, and a `~` mid-path is literal.
+        s.default_root = Some("~".into());
+        assert_eq!(s.effective_default_root("/Sites"), home);
+        s.default_root = Some("/var/~/www".into());
+        assert_eq!(s.effective_default_root("/Sites"), "/var/~/www");
+        // The sites-root fallback gets the same treatment.
+        s.default_root = None;
+        assert_eq!(
+            s.effective_default_root("~/workspace"),
+            format!("{home}/workspace")
+        );
     }
 
     #[test]

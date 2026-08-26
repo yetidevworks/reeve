@@ -233,8 +233,8 @@ impl Apache {
             let php_sock = super::default_php_socket(state, cfg);
             let body = |out: &mut String| {
                 out.push_str("    ServerName localhost\n");
-                out.push_str(&format!("    DocumentRoot {}\n", q(root)));
-                out.push_str(&format!("    <Directory {}>\n", q(root)));
+                out.push_str(&format!("    DocumentRoot {}\n", q(&root)));
+                out.push_str(&format!("    <Directory {}>\n", q(&root)));
                 out.push_str("        Options Indexes FollowSymLinks\n");
                 out.push_str("        AllowOverride All\n");
                 out.push_str("        Require all granted\n");

@@ -113,7 +113,7 @@ impl Caddy {
             let root = server.effective_default_root(&cfg.sites_root);
             let php_sock = super::default_php_socket(state, cfg);
             let body = |out: &mut String| {
-                out.push_str(&format!("\troot * {}\n", quote(root)));
+                out.push_str(&format!("\troot * {}\n", quote(&root)));
                 out.push_str(crate::preset::caddy_security(server.default_preset));
                 if let Some(sock) = &php_sock {
                     out.push_str(&format!(
