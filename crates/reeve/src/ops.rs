@@ -279,6 +279,26 @@ pub fn install_php(version: &str) -> Result<()> {
     Ok(())
 }
 
+/// Heal a managed version that Homebrew left unpinned (or dropped entirely):
+/// install a real `php@<version>` keg and restart its FPM master on the settings
+/// it already had. This repairs the keg underneath a version — unlike
+/// [`install_php`] it never adds one, so it can't quietly resurrect a version
+/// the user removed.
+pub fn pin_php(version: &str) -> Result<php::Healed> {
+    let brew = Brew::detect()?;
+    let state = load_state()?;
+    let record = state.get_php(version).cloned().ok_or_else(|| {
+        anyhow!("PHP {version} is not managed by reeve — use `reeve php install {version}`")
+    })?;
+    let healed = php::pin(&brew, &record)?;
+    // The same series bump that took the keg also strands the CLI shims if they
+    // pointed at this version. The keg is back now, so re-link them.
+    if php::cli_shim_dangling() && php::current_cli_php().as_deref() == Some(version) {
+        php::set_cli_php(&brew, version)?;
+    }
+    Ok(healed)
+}
+
 /// Stop and unmanage a PHP version. Refuses if a vhost still uses it. Leaves the
 /// brew formula installed (so it can be re-adopted); only stops the FPM master
 /// and drops it from state.

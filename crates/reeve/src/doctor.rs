@@ -145,20 +145,49 @@ pub fn run(brew: Option<&Brew>, cfg: &Config, state: &State) -> Vec<Check> {
         checks.push(Check::new(format!("server {}", s.name), health, detail));
     }
 
-    // PHP: formula installed + FPM socket alive.
+    // Which series Homebrew's unversioned `php` currently holds. Reported on its
+    // own because it is the moving part behind every "it was installed
+    // yesterday" PHP failure, and knowing where it sits explains the rest.
+    if let Some(b) = brew {
+        if let Some(v) = php::default_version(b) {
+            checks.push(Check::new(
+                "brew php",
+                Health::Ok,
+                format!("unversioned keg is {v} — it moves on at each series bump"),
+            ));
+        }
+    }
+
+    // PHP: a keg still resolves + FPM socket alive.
     for p in &state.php_versions {
+        // Appended to the socket line for a version running off the keg that
+        // moves, so it never looks like an ordinary pinned one.
+        let mut note = String::new();
         if let Some(b) = brew {
-            if !php::is_installed(b, &p.version) {
-                checks.push(Check::new(
-                    format!("php {}", p.version),
-                    Health::Fail,
-                    format!(
-                        "{} missing — run `reeve php install {}`",
-                        php::formula(&p.version),
-                        p.version
-                    ),
-                ));
-                continue;
+            match php::keg(b, &p.version) {
+                php::Keg::Missing => {
+                    let mut detail = php::missing_message(b, &p.version);
+                    // A master started before the keg moved keeps running off
+                    // the same path — which now holds a different PHP. Sites on
+                    // this version are being served the wrong one, quietly, so
+                    // this is the one case worth spelling out.
+                    if daemon::socket_alive(std::path::Path::new(&p.fpm_socket)) {
+                        detail.push_str(
+                            " Its FPM master is still up on the old path and may now be \
+                             serving a different PHP version.",
+                        );
+                    }
+                    checks.push(Check::new(
+                        format!("php {}", p.version),
+                        Health::Fail,
+                        detail,
+                    ));
+                    continue;
+                }
+                php::Keg::Floating { actual, .. } => {
+                    note = format!(" — {}", php::floating_note(&p.version, &actual));
+                }
+                php::Keg::Pinned { .. } => {}
             }
         }
         let socket = std::path::Path::new(&p.fpm_socket);
@@ -166,13 +195,13 @@ pub fn run(brew: Option<&Brew>, cfg: &Config, state: &State) -> Vec<Check> {
             checks.push(Check::new(
                 format!("php {}", p.version),
                 Health::Ok,
-                "FPM socket live".to_string(),
+                format!("FPM socket live{note}"),
             ));
         } else {
             checks.push(Check::new(
                 format!("php {}", p.version),
                 Health::Warn,
-                "FPM socket not present — master stopped?".to_string(),
+                format!("FPM socket not present — master stopped?{note}"),
             ));
         }
     }
@@ -180,7 +209,19 @@ pub fn run(brew: Option<&Brew>, cfg: &Config, state: &State) -> Vec<Check> {
     // CLI php shim: only reported once the user has opted in by setting one.
     if let Some(cli_ver) = php::current_cli_php() {
         let on_path = brew.map(php::shim_on_path).unwrap_or(false);
-        if on_path {
+        if php::cli_shim_dangling() {
+            // The shimmed keg went away underneath us. Worth its own Fail: a
+            // dangling ~/.reeve/bin/php breaks `php` in every shell on PATH,
+            // not just reeve's own commands.
+            checks.push(Check::new(
+                "cli php",
+                Health::Fail,
+                format!(
+                    "shim points at {cli_ver}, whose keg is gone — `php` is broken in every \
+                     shell; run `reeve php pin {cli_ver}`"
+                ),
+            ));
+        } else if on_path {
             checks.push(Check::new(
                 "cli php",
                 Health::Ok,

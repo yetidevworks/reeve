@@ -19,6 +19,112 @@ pub fn formula(version: &str) -> String {
     format!("php@{version}")
 }
 
+/// Homebrew's unversioned PHP formula. It tracks the newest series and moves on
+/// periodically — it was 8.4, is 8.5, will be 8.6 — which is the whole reason
+/// [`Keg`] exists.
+const UNVERSIONED: &str = "php";
+
+/// The tap that carries a real `php@<series>` for every series, including the
+/// one Homebrew core currently ships unversioned. Core only publishes
+/// `php@<series>` formulae for *older* series; for the current one `php@8.5` is
+/// a bare alias for `php`, so pinning has to come from here.
+const PHP_TAP: &str = "shivammathur/php";
+
+/// How Homebrew currently provides a PHP version.
+///
+/// Homebrew ships exactly one unversioned `php` formula tracking the newest
+/// series, plus `php@<series>` formulae for the older ones. The unversioned keg
+/// periodically swallows a series, and while it holds one there is no
+/// `opt/php@<series>` link on disk — `php@8.5` is a bare alias today, resolvable
+/// by `brew install` but invisible to the filesystem. Anything bound to that
+/// path silently vanishes the moment core catches up, so every keg lookup goes
+/// through here instead of assuming `opt/php@<version>` exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Keg {
+    /// A real versioned keg at `opt/php@<version>`. Upgrades move it within the
+    /// series (8.5.10 -> 8.5.11) but never off it, so it is safe to bind to.
+    Pinned { prefix: PathBuf, actual: String },
+    /// Only the unversioned `php` keg happens to be this series right now. It
+    /// works this minute and disappears at the next series bump, taking the
+    /// version with it — so reeve reports it rather than binding an FPM master
+    /// to a moving target.
+    Floating { prefix: PathBuf, actual: String },
+    /// No keg provides this version at all.
+    Missing,
+}
+
+impl Keg {
+    /// The keg prefix, for the variants that have one.
+    pub fn prefix(&self) -> Option<&Path> {
+        match self {
+            Keg::Pinned { prefix, .. } | Keg::Floating { prefix, .. } => Some(prefix),
+            Keg::Missing => None,
+        }
+    }
+
+    /// True only for a version reeve can safely bind an FPM master to.
+    pub fn is_pinned(&self) -> bool {
+        matches!(self, Keg::Pinned { .. })
+    }
+}
+
+/// The `major.minor` series of a Homebrew version string: "8.5.10" -> "8.5",
+/// and "8.6.0_1" (a formula revision) -> "8.6".
+fn series(full: &str) -> Option<String> {
+    let mut parts = full
+        .split('.')
+        .map(|p| p.split(|c: char| !c.is_ascii_digit()).next().unwrap_or(""));
+    let major = parts.next().filter(|s| !s.is_empty())?;
+    let minor = parts.next().filter(|s| !s.is_empty())?;
+    Some(format!("{major}.{minor}"))
+}
+
+/// The exact version an `opt/<formula>` link resolves to, read straight from
+/// its Cellar target (`../Cellar/php/8.5.10` -> "8.5.10"). Pure filesystem, so
+/// it stays cheap enough for the TUI's refresh loop — no `brew` subprocess.
+fn keg_version(opt: &Path) -> Option<String> {
+    let target = std::fs::read_link(opt).ok()?;
+    Some(target.file_name()?.to_str()?.to_string())
+}
+
+/// Resolve how Homebrew provides `version` right now.
+pub fn keg(brew: &Brew, version: &str) -> Keg {
+    let pinned = brew.opt(&formula(version));
+    if pinned.exists() {
+        let actual = keg_version(&pinned).unwrap_or_else(|| version.to_string());
+        return Keg::Pinned {
+            prefix: pinned,
+            actual,
+        };
+    }
+    // No versioned keg. The unversioned `php` formula may currently *be* this
+    // series — the state a `brew upgrade` leaves behind when core's `php`
+    // catches up to a version reeve manages.
+    let floating = brew.opt(UNVERSIONED);
+    if floating.exists() {
+        if let Some(actual) = keg_version(&floating) {
+            if series(&actual).as_deref() == Some(version) {
+                return Keg::Floating {
+                    prefix: floating,
+                    actual,
+                };
+            }
+        }
+    }
+    Keg::Missing
+}
+
+/// The series Homebrew's unversioned `php` formula points at today — 8.5 now,
+/// 8.6 after the next bump. Callers use it to explain *why* a managed version
+/// went missing instead of just reporting it gone.
+pub fn default_version(brew: &Brew) -> Option<String> {
+    let opt = brew.opt(UNVERSIONED);
+    if !opt.exists() {
+        return None;
+    }
+    series(&keg_version(&opt)?)
+}
+
 /// Compact form, e.g. "8.3" -> "83".
 fn compact(version: &str) -> String {
     version.chars().filter(|c| c.is_ascii_digit()).collect()
@@ -40,9 +146,9 @@ pub fn launchd_log(version: &str) -> Result<PathBuf> {
     Ok(paths::logs_dir()?.join(format!("php{}-launchd.log", compact(version))))
 }
 
-/// Absolute php-fpm binary for a version (shivammathur layout).
-fn fpm_binary(brew: &Brew, version: &str) -> PathBuf {
-    brew.opt(&formula(version)).join("sbin/php-fpm")
+/// Absolute php-fpm binary inside a resolved keg (shivammathur layout).
+fn fpm_binary(prefix: &Path) -> PathBuf {
+    prefix.join("sbin/php-fpm")
 }
 
 /// php.ini directory for a version, e.g. `<prefix>/etc/php/8.3`.
@@ -352,7 +458,18 @@ fn fpm_define_args(php: &PhpVersion) -> Vec<String> {
 pub fn ensure_fpm_running(brew: &Brew, php: &PhpVersion) -> Result<()> {
     let version = &php.version;
     let conf = render_fpm_conf(php)?;
-    let bin = fpm_binary(brew, version);
+    // Resolve the keg rather than assuming `opt/php@<version>`: Homebrew's
+    // unversioned `php` periodically takes over a series and deletes that link.
+    // Running off the floating keg is legitimate — while a series is the current
+    // stable one that keg is the *only* thing that provides it. Resolving here
+    // on every start is what keeps that safe: the series is re-verified each
+    // time, so a keg that has moved on shows up as Missing instead of quietly
+    // serving the wrong PHP on this version's socket.
+    let prefix = match keg(brew, version) {
+        Keg::Pinned { prefix, .. } | Keg::Floating { prefix, .. } => prefix,
+        Keg::Missing => bail!("{}", missing_message(brew, version)),
+    };
+    let bin = fpm_binary(&prefix);
     if !bin.exists() {
         bail!(
             "php-fpm binary not found at {} — is {} installed?",
@@ -433,7 +550,12 @@ pub fn ensure_fpm_running(brew: &Brew, php: &PhpVersion) -> Result<()> {
 fn fpm_failure_diagnostics(brew: &Brew, version: &str, conf: &Path) -> String {
     let mut parts: Vec<String> = Vec::new();
 
-    let bin = fpm_binary(brew, version);
+    // Diagnostics run after a start attempt, so the keg resolved once already;
+    // fall back to the conventional path if it somehow vanished in between.
+    let bin = keg(brew, version)
+        .prefix()
+        .map(fpm_binary)
+        .unwrap_or_else(|| fpm_binary(&brew.opt(&formula(version))));
     match Command::new(&bin)
         .arg("-t")
         .arg("--fpm-config")
@@ -466,9 +588,31 @@ fn fpm_failure_diagnostics(brew: &Brew, version: &str, conf: &Path) -> String {
     parts.join("\n\n")
 }
 
-/// Is this PHP version's brew formula installed?
+/// Is this PHP version backed by a real, pinned `php@<version>` keg? False for
+/// one provided only by the floating `php` keg — see [`Keg`].
 pub fn is_installed(brew: &Brew, version: &str) -> bool {
-    brew.is_installed(&formula(version))
+    keg(brew, version).is_pinned()
+}
+
+/// The one explanation of a version reeve can no longer find a keg for, shared
+/// by the FPM error, the doctor check and the dashboard notice so they never
+/// drift apart. Names the floating keg's current series when that is what
+/// swallowed the version, since "it worked yesterday" has no other explanation.
+pub fn missing_message(brew: &Brew, version: &str) -> String {
+    match default_version(brew) {
+        Some(d) if d != version => format!(
+            "no php@{version} keg — Homebrew's unversioned `php` has moved on to {d}, \
+             taking {version} with it. Run `reeve php pin {version}` to reinstall it."
+        ),
+        _ => format!("PHP {version} is not installed — run `reeve php install {version}`."),
+    }
+}
+
+/// The informational note for a version served by the floating keg. Not a
+/// warning: while a series is the current stable one there is no `php@<series>`
+/// formula to pin to, so this is simply how that version has to run.
+pub fn floating_note(version: &str, actual: &str) -> String {
+    format!("on Homebrew's unversioned `php` keg ({actual}) — no php@{version} formula exists yet")
 }
 
 /// The toolchain binaries reeve shims for the CLI. `php` is the one that
@@ -480,13 +624,14 @@ const SHIM_BINARIES: &[&str] = &["php", "php-config", "phpize", "pecl", "phar"];
 /// `php` (for any shell with `~/.reeve/bin` ahead of Homebrew's bin on PATH).
 /// Pure symlink work — Homebrew's link state is never touched.
 pub fn set_cli_php(brew: &Brew, version: &str) -> Result<()> {
-    if !is_installed(brew, version) {
-        bail!("PHP {version} is not installed — run `reeve php install {version}` first.");
-    }
+    let prefix = match keg(brew, version) {
+        Keg::Pinned { prefix, .. } | Keg::Floating { prefix, .. } => prefix,
+        Keg::Missing => bail!("{}", missing_message(brew, version)),
+    };
     let shim = paths::shim_dir()?;
     std::fs::create_dir_all(&shim)
         .with_context(|| format!("Failed to create shim dir {}", shim.display()))?;
-    let bindir = brew.opt(&formula(version)).join("bin");
+    let bindir = prefix.join("bin");
 
     for name in SHIM_BINARIES {
         let link = shim.join(name);
@@ -510,10 +655,20 @@ pub fn current_cli_php() -> Option<String> {
     let link = paths::shim_dir().ok()?.join("php");
     let target = std::fs::read_link(&link).ok()?;
     // …/opt/php@8.4/bin/php  ->  8.4
-    target
+    if let Some(v) = target
         .components()
         .find_map(|c| c.as_os_str().to_str()?.strip_prefix("php@"))
-        .map(str::to_string)
+    {
+        return Some(v.to_string());
+    }
+    // …/opt/php/bin/php — the shim points at the unversioned keg, so the answer
+    // is whatever series that keg holds *now*. Read it live rather than
+    // remembering: this is precisely the keg that moves.
+    let brew = Brew::detect().ok()?;
+    if target.starts_with(brew.opt(UNVERSIONED)) {
+        return default_version(&brew);
+    }
+    None
 }
 
 /// True when `~/.reeve/bin` is on PATH ahead of Homebrew's bin (so the shims
@@ -542,20 +697,7 @@ pub fn shim_on_path(brew: &Brew) -> bool {
 /// return the [`PhpVersion`] record to persist. Reuses an existing brew install
 /// rather than reinstalling.
 pub fn install(brew: &Brew, version: &str) -> Result<PhpVersion> {
-    brew.ensure_tap("shivammathur/php")?;
-    // Bleeding-edge versions (e.g. 8.6+) live only in the tap, not Homebrew
-    // core, and newer Homebrew refuses to load untrusted taps. Trust it so
-    // tap-only versions install. (Core versions like 8.4/8.5 ignore this.)
-    brew.trust_tap("shivammathur/php");
-    if is_installed(brew, version) {
-        println!("• {} already installed — adopting it", formula(version));
-    } else {
-        println!(
-            "Installing {} (this can take a few minutes)…",
-            formula(version)
-        );
-        brew.install(&formula(version))?;
-    }
+    ensure_keg(brew, version)?;
     let record = PhpVersion {
         version: version.to_string(),
         fpm_socket: fpm_socket(version)?.display().to_string(),
@@ -565,7 +707,99 @@ pub fn install(brew: &Brew, version: &str) -> Result<PhpVersion> {
     Ok(record)
 }
 
-/// Scan `<prefix>/opt/php@*` for already-installed versions.
+/// What making a version runnable actually achieved, so callers report it
+/// honestly instead of claiming a pin they could not perform.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Healed {
+    /// A real `php@<version>` keg is installed. Stable: `brew upgrade` moves it
+    /// within the series but can never move it off.
+    Pinned,
+    /// No `php@<version>` formula exists, because this is the series Homebrew
+    /// currently ships unversioned. The floating keg was adopted instead.
+    Adopted { actual: String },
+}
+
+/// Make `version` runnable, preferring a keg Homebrew cannot move.
+///
+/// Homebrew — core and the shivammathur tap alike — publishes `php@<series>`
+/// only for series that are *not* the current stable one. While a series is
+/// current it exists solely as the unversioned `php` formula, and
+/// `php@<series>` is a bare alias for it, so there is genuinely nothing to pin
+/// to and adopting the floating keg is the only option. That resolves itself on
+/// its own schedule: once the next series lands, `php@<version>` becomes a real
+/// formula and this same call pins it for good.
+fn ensure_keg(brew: &Brew, version: &str) -> Result<Healed> {
+    brew.ensure_tap(PHP_TAP)?;
+    // Bleeding-edge versions (e.g. 8.6+) live only in the tap, not Homebrew
+    // core, and newer Homebrew refuses to load untrusted taps.
+    brew.trust_tap(PHP_TAP);
+
+    if is_installed(brew, version) {
+        return Ok(Healed::Pinned);
+    }
+    // Only install `php@<version>` when that name resolves to a real formula.
+    // Installing an alias would hand back the unversioned `php` keg under a
+    // different name — or, from a tap, a second conflicting `php` formula.
+    if brew.is_real_formula(&formula(version)) {
+        println!(
+            "Installing {} (this can take a few minutes)…",
+            formula(version)
+        );
+        brew.install(&formula(version))?;
+        if !is_installed(brew, version) {
+            bail!(
+                "`brew install {}` finished but {} still does not exist.",
+                formula(version),
+                brew.opt(&formula(version)).display()
+            );
+        }
+        return Ok(Healed::Pinned);
+    }
+    // Unpinnable. Adopt the unversioned keg if it already holds this series…
+    if let Keg::Floating { actual, .. } = keg(brew, version) {
+        return Ok(Healed::Adopted { actual });
+    }
+    // …otherwise install it, since that is the only form this series ships in.
+    println!(
+        "php@{version} is an alias — Homebrew ships {version} as its unversioned \
+         `php`. Installing that (this can take a few minutes)…"
+    );
+    brew.install(UNVERSIONED)?;
+    match keg(brew, version) {
+        Keg::Floating { actual, .. } => Ok(Healed::Adopted { actual }),
+        _ => bail!(
+            "PHP {version} is not available: Homebrew has no php@{version} formula, and its \
+             unversioned `php` is {}.",
+            default_version(brew).unwrap_or_else(|| "absent".into())
+        ),
+    }
+}
+
+/// Heal a version reeve manages but can no longer run: get a keg for it and
+/// bring its FPM master back up on the settings it already had. Unlike
+/// [`install`] it never adds a version, so it can't resurrect one the user
+/// removed. Returns which kind of keg it ended up with.
+pub fn pin(brew: &Brew, php: &PhpVersion) -> Result<Healed> {
+    let healed = ensure_keg(brew, &php.version)?;
+    ensure_fpm_running(brew, php)?;
+    Ok(healed)
+}
+
+/// Does `~/.reeve/bin/php` exist but point nowhere? This is the wreckage a
+/// series bump leaves behind when the CLI was shimmed to the swallowed version,
+/// and it breaks `php` in every shell — not just reeve — so it is worth calling
+/// out on its own rather than folding into the per-version checks.
+pub fn cli_shim_dangling() -> bool {
+    let Ok(link) = paths::shim_dir().map(|d| d.join("php")) else {
+        return false;
+    };
+    // symlink_metadata succeeds on a dangling link; exists() follows it.
+    std::fs::symlink_metadata(&link).is_ok() && !link.exists()
+}
+
+/// Every PHP series Homebrew can currently provide: the pinned `php@*` kegs,
+/// plus the series the unversioned `php` keg happens to be holding (which no
+/// `php@*` link advertises).
 pub fn discover(brew: &Brew) -> Vec<String> {
     let opt = brew.prefix.join("opt");
     let mut found = Vec::new();
@@ -578,7 +812,12 @@ pub fn discover(brew: &Brew) -> Vec<String> {
             }
         }
     }
-    found.sort();
+    if let Some(v) = default_version(brew) {
+        found.push(v);
+    }
+    // Numeric order, so 8.10 would sort after 8.9 rather than before 8.2.
+    found.sort_by_key(|v| crate::state::version_key(v));
+    found.dedup();
     found
 }
 
@@ -587,6 +826,43 @@ mod tests {
     use super::*;
 
     use crate::state::XdebugMode;
+
+    #[test]
+    fn series_extracts_major_minor() {
+        assert_eq!(series("8.5.10").as_deref(), Some("8.5"));
+        // Homebrew formula revisions carry an `_N` suffix.
+        assert_eq!(series("8.6.0_1").as_deref(), Some("8.6"));
+        assert_eq!(series("7.4.33_13").as_deref(), Some("7.4"));
+        // A two-part version is already a series.
+        assert_eq!(series("8.5").as_deref(), Some("8.5"));
+        // Nothing usable.
+        assert_eq!(series("8"), None);
+        assert_eq!(series(""), None);
+        assert_eq!(series("HEAD"), None);
+    }
+
+    #[test]
+    fn keg_reports_prefix_and_version() {
+        let pinned = Keg::Pinned {
+            prefix: PathBuf::from("/opt/homebrew/opt/[email protected]"),
+            actual: "8.4.25".into(),
+        };
+        assert!(pinned.is_pinned());
+        assert_eq!(
+            pinned.prefix(),
+            Some(Path::new("/opt/homebrew/opt/[email protected]"))
+        );
+
+        let floating = Keg::Floating {
+            prefix: PathBuf::from("/opt/homebrew/opt/php"),
+            actual: "8.5.10".into(),
+        };
+        assert!(!floating.is_pinned());
+        assert_eq!(floating.prefix(), Some(Path::new("/opt/homebrew/opt/php")));
+
+        assert!(!Keg::Missing.is_pinned());
+        assert_eq!(Keg::Missing.prefix(), None);
+    }
 
     #[test]
     fn naming_conventions() {

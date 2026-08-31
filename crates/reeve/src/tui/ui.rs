@@ -28,7 +28,12 @@ pub fn render(f: &mut Frame, app: &App) {
     }
 
     let servers_h = (app.state.servers.len() as u16 + 2).clamp(3, 14);
-    let php_h = 3;
+    // One extra row for the keg notice, whether it's a warning or just context.
+    let php_h = if app.php_needs_repair.is_empty() && app.php_floating.is_empty() {
+        3
+    } else {
+        4
+    };
     let services_h = (app.state.services.len() as u16 + 2).clamp(3, 8);
     let declared_h = (app.state.vhosts.len() as u16 + 2).clamp(3, 8);
 
@@ -616,6 +621,18 @@ fn render_keys(f: &mut Frame, app: &App, area: Rect) {
             ("r", "apply"),
             ("q", "quit"),
         ],
+        Panel::Php if !app.php_needs_repair.is_empty() => &[
+            ("H", "repair keg"),
+            ("enter/r", "restart"),
+            ("x", "stop"),
+            ("n", "install"),
+            ("e", "exts"),
+            ("s", "settings"),
+            ("d", "default"),
+            ("R/del", "remove"),
+            ("L", "log"),
+            ("q", "quit"),
+        ],
         Panel::Php => &[
             ("enter/r", "restart"),
             ("x", "stop"),
@@ -1019,7 +1036,19 @@ fn render_php(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         let is_default = default.as_deref() == Some(p.version.as_str());
         let label = format!("{}{} ", p.version, if is_default { "★" } else { "" });
         spans.push(Span::styled(label, row_style(sel, focused)));
-        spans.push(status_span(status));
+        // "no keg" rather than the launchd status: the master isn't crashed,
+        // Homebrew took the keg out from under it. Different cause, different
+        // fix, so it gets its own marker.
+        if app.php_needs_repair.iter().any(|(v, _)| *v == p.version) {
+            spans.push(Span::styled("⚠ no keg", Style::default().fg(Color::Yellow)));
+        } else {
+            spans.push(status_span(status));
+            // A version on the floating keg is running normally — the tilde is
+            // just a pointer to the notice below.
+            if app.php_floating.iter().any(|(v, _)| *v == p.version) {
+                spans.push(Span::styled("~", Style::default().fg(Color::DarkGray)));
+            }
+        }
         if !p.xdebug.is_off() {
             spans.push(Span::styled(
                 format!(" 🐛{}", p.xdebug.as_str()),
@@ -1028,10 +1057,62 @@ fn render_php(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         }
         spans.push(Span::raw("   "));
     }
+    let mut lines = vec![Line::from(spans)];
+    // A lost keg is actionable and outranks the informational floating note.
+    if let Some(notice) = repair_notice(&app.php_needs_repair) {
+        lines.push(Line::from(Span::styled(
+            notice,
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+    } else if let Some(note) = floating_notice(&app.php_floating) {
+        lines.push(Line::from(Span::styled(
+            note,
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
     f.render_widget(
-        Paragraph::new(Line::from(spans)).block(panel_block(&title, focused)),
+        Paragraph::new(lines).block(panel_block(&title, focused)),
         area,
     );
+}
+
+/// The actionable one-liner for versions whose keg Homebrew no longer provides.
+/// Reuses the resolver's own explanation for the single-version case, so the
+/// dashboard, doctor and the CLI all give the same account of what happened.
+fn repair_notice(broken: &[(String, String)]) -> Option<String> {
+    match broken {
+        [] => None,
+        [(_, why)] => Some(format!(" ⚠ {why} (press H)")),
+        many => {
+            let vers: Vec<&str> = many.iter().map(|(v, _)| v.as_str()).collect();
+            Some(format!(
+                " ⚠ no keg for PHP {} — Homebrew moved on without them; press H to repair",
+                vers.join(", ")
+            ))
+        }
+    }
+}
+
+/// The quiet counterpart: which versions ride Homebrew's unversioned `php` keg.
+/// Worth stating because that keg moves series on Homebrew's schedule, not the
+/// user's — but it is context, not a problem, so it stays understated.
+fn floating_notice(floating: &[(String, String)]) -> Option<String> {
+    match floating {
+        [] => None,
+        [(version, actual)] => Some(format!(
+            " ~ {version} runs on Homebrew's unversioned `php` keg ({actual}) — no php@{version} \
+              formula exists yet; reeve re-checks it on every start"
+        )),
+        many => {
+            let vers: Vec<&str> = many.iter().map(|(v, _)| v.as_str()).collect();
+            Some(format!(
+                " ~ {} run on Homebrew's unversioned `php` keg — reeve re-checks it on every start",
+                vers.join(", ")
+            ))
+        }
+    }
 }
 
 fn render_services(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {

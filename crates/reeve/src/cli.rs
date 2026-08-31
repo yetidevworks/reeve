@@ -104,6 +104,10 @@ pub enum DnsCommands {
 pub enum PhpCommands {
     /// Install a PHP version (e.g. `8.3`) and stand up its FPM master.
     Install { version: String },
+    /// Repair a version whose Homebrew keg went away: reinstall php@<version>
+    /// if that formula exists yet, otherwise adopt the unversioned `php` keg
+    /// holding the series, then restart FPM.
+    Pin { version: String },
     /// List installed PHP versions and FPM status.
     List,
     /// Set the default PHP version for new vhosts.

@@ -87,6 +87,36 @@ impl Brew {
         self.opt(formula).exists()
     }
 
+    /// Does `formula` name a real formula, or is it merely an alias for another
+    /// one? `brew formula <name>` prints the path of the .rb it resolves to, so
+    /// an alias hands back a different basename.
+    ///
+    /// This matters because Homebrew — core and third-party taps alike —
+    /// publishes `php@<series>` only for series that are *not* the current
+    /// stable one. While a series is current it exists solely as the
+    /// unversioned `php`, and `php@<series>` is a bare alias for it. So
+    /// "installable" and "gives you a keg of that name" are different
+    /// questions, and only this tells them apart.
+    pub fn is_real_formula(&self, formula: &str) -> bool {
+        let Ok(out) = Command::new(self.brew_bin())
+            .args(["formula", formula])
+            .output()
+        else {
+            return false;
+        };
+        if !out.status.success() {
+            return false;
+        }
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .map(|p| Path::new(p.trim()))
+            .and_then(|p| p.file_stem())
+            .and_then(|s| s.to_str())
+            .map(|stem| stem == formula)
+            .unwrap_or(false)
+    }
+
     /// Run `brew install <formula>`, streaming output to the user's terminal.
     pub fn install(&self, formula: &str) -> Result<()> {
         let status = Command::new(self.brew_bin())

@@ -309,6 +309,30 @@ fn cmd_php(c: PhpCommands) -> Result<()> {
             );
             Ok(())
         }
+        PhpCommands::Pin { version } => {
+            brew::Brew::detect_or_offer_install()?;
+            match ops::pin_php(&version)? {
+                php::Healed::Pinned => {
+                    println!("✓ PHP {version} pinned to {}", php::formula(&version))
+                }
+                php::Healed::Adopted { actual } => {
+                    println!(
+                        "✓ PHP {version} adopted from Homebrew's unversioned `php` keg ({actual})"
+                    );
+                    println!(
+                        "  No php@{version} formula exists while {version} is the current series. \
+                         reeve re-checks the keg on every start and will flag it the moment \
+                         Homebrew moves on."
+                    );
+                }
+            }
+            println!(
+                "  FPM master '{}' is {}",
+                daemon::label(&php::service_id(&version)),
+                daemon::status(&php::service_id(&version)).as_str()
+            );
+            Ok(())
+        }
         PhpCommands::List => {
             let mut state = load_state()?;
             state.sort_php();
@@ -317,14 +341,27 @@ fn cmd_php(c: PhpCommands) -> Result<()> {
             } else {
                 let cfg = load_config().ok();
                 let default = cfg.and_then(|c| c.default_php);
+                let brew = brew::Brew::detect().ok();
                 println!("{:<8} {:<9} {:<8} SOCKET", "VERSION", "FPM", "DEFAULT");
                 for p in &state.php_versions {
-                    let status = daemon::status(&php::service_id(&p.version));
+                    // "no keg" beats a bare "error": the master isn't crashed,
+                    // Homebrew's series bump took the keg out from under it.
+                    let no_keg = brew
+                        .as_ref()
+                        .map(|b| php::keg(b, &p.version) == php::Keg::Missing)
+                        .unwrap_or(false);
+                    let status = if no_keg {
+                        "no keg".to_string()
+                    } else {
+                        daemon::status(&php::service_id(&p.version))
+                            .as_str()
+                            .to_string()
+                    };
                     let is_default = default.as_deref() == Some(p.version.as_str());
                     println!(
                         "{:<8} {:<9} {:<8} {}",
                         p.version,
-                        status.as_str(),
+                        status,
                         if is_default { "*" } else { "" },
                         p.fpm_socket
                     );
@@ -937,8 +974,13 @@ fn cmd_apply() -> Result<()> {
     // the launchd QoS apply to all versions, not just whichever was last
     // touched) and restart it.
     for php in &state.php_versions {
-        php::ensure_fpm_running(&brew, php)?;
-        println!("✓ php {} FPM master reconciled", php.version);
+        // Report and carry on rather than `?`: a single version whose keg
+        // Homebrew moved must not stop the other versions, servers and vhosts
+        // from being applied.
+        match php::ensure_fpm_running(&brew, php) {
+            Ok(()) => println!("✓ php {} FPM master reconciled", php.version),
+            Err(e) => println!("✗ php {} not reconciled — {e}", php.version),
+        }
     }
     Ok(())
 }

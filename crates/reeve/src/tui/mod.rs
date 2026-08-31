@@ -116,6 +116,17 @@ pub struct App {
     /// A PHP version queued for install — run_loop suspends the TUI, installs
     /// it (showing brew output), then resumes. Avoids a frozen screen.
     pub pending_install: Option<String>,
+    /// Managed versions Homebrew can no longer provide any keg for, each with a
+    /// ready-made explanation. Recomputed every refresh; drives the PHP panel's
+    /// warning and the `H` heal key.
+    pub php_needs_repair: Vec<(String, String)>,
+    /// Managed versions running off Homebrew's unversioned `php` keg, paired
+    /// with its exact version (e.g. "8.5.10"). Informational, not a fault:
+    /// while a series is the current stable one that keg is the only thing that
+    /// provides it. They land in `php_needs_repair` if it ever moves on.
+    pub php_floating: Vec<(String, String)>,
+    /// A queued pin — run_loop suspends the TUI to show the (slow) brew output.
+    pub pending_pin: Option<String>,
     /// Whether `*.tld` system resolution is configured (host resolver present).
     pub dns_ok: bool,
     /// "remove server <name>?" confirmation, when showing.
@@ -388,6 +399,9 @@ impl App {
             php_install: None,
             confirm_remove_php: None,
             pending_install: None,
+            php_needs_repair: Vec::new(),
+            php_floating: Vec::new(),
+            pending_pin: None,
             dns_ok: false,
             confirm_remove_server: None,
             ext_modal: None,
@@ -444,6 +458,22 @@ impl App {
         self.parked_unapplied = crate::ops::unapplied_parked_hosts(&self.state).len();
         self.dns_ok = crate::dns::resolver_ok_all(&self.config.local_tlds);
         let brew = Brew::detect().ok();
+        // Cheap: each check is one readlink, no `brew` subprocess.
+        self.php_needs_repair.clear();
+        self.php_floating.clear();
+        if let Some(b) = brew.as_ref() {
+            for p in &self.state.php_versions {
+                match php::keg(b, &p.version) {
+                    php::Keg::Missing => self
+                        .php_needs_repair
+                        .push((p.version.clone(), php::missing_message(b, &p.version))),
+                    php::Keg::Floating { actual, .. } => {
+                        self.php_floating.push((p.version.clone(), actual))
+                    }
+                    php::Keg::Pinned { .. } => {}
+                }
+            }
+        }
         self.health = doctor::summary(&doctor::run(brew.as_ref(), &self.config, &self.state));
         self.clamp();
     }
@@ -820,6 +850,9 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) ->
         if let Some(ver) = app.pending_install.take() {
             run_install_suspended(terminal, app, &ver)?;
         }
+        if let Some(ver) = app.pending_pin.take() {
+            run_pin_suspended(terminal, app, &ver)?;
+        }
 
         // A queued extension add/remove (pecl is slow) runs the same way.
         if let Some(pe) = app.pending_ext.take() {
@@ -1112,6 +1145,20 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             Panel::Php => open_ext_modal(app),
             Panel::Parked | Panel::Services => {}
         },
+        // Heal an unpinned version. Global rather than PHP-panel-only: the
+        // notice is what prompts the keypress, and it stays visible whatever
+        // panel has focus. With the PHP panel focused the selected version
+        // wins, otherwise the first unpinned one.
+        KeyCode::Char('H') if !app.php_needs_repair.is_empty() => {
+            let target = app
+                .selected_php_version()
+                .filter(|v| app.php_needs_repair.iter().any(|(u, _)| u == v))
+                .or_else(|| app.php_needs_repair.first().map(|(v, _)| v.clone()));
+            if let Some(v) = target {
+                app.message = format!("pinning PHP {v}…");
+                app.pending_pin = Some(v);
+            }
+        }
         KeyCode::Char('D') => {
             // Queue it: run_loop runs DNS setup after this key is handled, so it
             // can suspend the dashboard first when escalation needs an
@@ -2567,6 +2614,50 @@ fn run_install_suspended(
     app.message = match result {
         Ok(()) => format!("✓ installed PHP {version}"),
         Err(e) => format!("✗ install PHP {version}: {e}"),
+    };
+    app.refresh();
+    Ok(())
+}
+
+/// Suspend the TUI to pin a version Homebrew unpinned, showing brew's output —
+/// this installs a real keg, so it takes as long as any other PHP install.
+fn run_pin_suspended(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut App,
+    version: &str,
+) -> Result<()> {
+    restore_terminal(terminal)?;
+    println!("\n── Repairing PHP {version} (this can take a few minutes) ──\n");
+    let result = ops::pin_php(version);
+    match &result {
+        Ok(php::Healed::Pinned) => {
+            println!("\n✓ PHP {version} pinned to php@{version}. Press any key to return…")
+        }
+        Ok(php::Healed::Adopted { actual }) => println!(
+            "\n✓ PHP {version} adopted from Homebrew's unversioned `php` keg ({actual}).\n\
+             No php@{version} formula exists while {version} is current; reeve will flag it\n\
+             the moment that keg moves on. Press any key to return…"
+        ),
+        Err(e) => println!("\n✗ repair failed: {e}\nPress any key to return…"),
+    }
+    let _ = enable_raw_mode();
+    loop {
+        if event::poll(Duration::from_millis(500))? {
+            if let Event::Key(k) = event::read()? {
+                if k.kind == KeyEventKind::Press {
+                    break;
+                }
+            }
+        }
+    }
+    let _ = disable_raw_mode();
+    *terminal = setup_terminal()?;
+    app.message = match result {
+        Ok(php::Healed::Pinned) => format!("✓ pinned PHP {version} to php@{version}"),
+        Ok(php::Healed::Adopted { actual }) => {
+            format!("✓ PHP {version} adopted from the unversioned `php` keg ({actual})")
+        }
+        Err(e) => format!("✗ repair PHP {version}: {e}"),
     };
     app.refresh();
     Ok(())

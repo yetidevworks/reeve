@@ -2,6 +2,18 @@
 
 All notable changes to reeve are documented here.
 
+## 1.0.1
+
+### Fixed
+- **A PHP version no longer vanishes when Homebrew's `php` formula moves to the next series.** Homebrew ships one unversioned `php` that tracks the newest series — it was 8.4, is 8.5, will be 8.6 — and publishes `php@<series>` only for the series that are *not* current. While a series is current, `php@<series>` is a bare alias with no `opt/php@<series>` link on disk. reeve decided "is this installed?" purely by that path existing, so the moment `brew upgrade` moved the unversioned keg onto a managed version, that version's FPM master, php-fpm binary path and CLI shims all silently pointed at nothing. Every PHP lookup now resolves the providing keg — a real `php@<version>` when one exists, otherwise the unversioned keg, verified by its actual version rather than its path name — so the current series runs correctly instead of reading as uninstalled.
+- **`reeve php install <version>` no longer reports success without installing anything.** For the current series, `brew install php@8.5` resolves the alias, confirms the unversioned `php` keg and exits 0 while no `opt/php@8.5` ever appears — so reeve claimed success and `doctor` kept failing, with no command that could fix it. Installs now check whether the name resolves to a real formula before using it, and verify the keg afterwards rather than trusting brew's exit code.
+- **`reeve apply` no longer aborts on the first PHP version it can't start.** One version whose keg Homebrew moved stopped every other version, server and vhost from being reconciled. Failures are now reported per version and the run continues.
+- **`reeve doctor` says what actually happened.** A version taken by a series bump used to read `php@8.5 missing — run reeve php install 8.5`, which was both wrong and a dead end. It now names the unversioned keg's current series, reports the CLI shim separately when it's left dangling (which breaks `php` in every shell, not just reeve's), and warns when an FPM master is still up on a path whose PHP has changed underneath it.
+
+### Added
+- **`reeve php pin <version>` repairs a version whose Homebrew keg went away** — reinstalling `php@<version>` when that formula exists, or adopting the unversioned keg holding the series when it doesn't, then restarting FPM and re-linking a stranded CLI shim. The dashboard offers the same repair on **`H`** when it detects one.
+- **The dashboard and `doctor` report which keg each version runs on.** A version riding the unversioned `php` keg is marked with `~` and a note naming the exact version it resolved to, since that keg moves on Homebrew's schedule rather than yours. `doctor` also reports the unversioned keg's current series on its own line.
+
 ## 1.0.0
 
 First stable release. reeve has been in daily use driving a real multi-site, multi-PHP workspace since 0.1, and the CLI, `state.toml` and `config.toml` formats are now considered stable — they'll follow semver from here.
