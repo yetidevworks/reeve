@@ -14,7 +14,7 @@ use crate::logs;
 use crate::ops;
 use crate::php;
 use crate::ssl;
-use crate::state::{load_state, Backend, Framework, State, XdebugMode};
+use crate::state::{load_state, Backend, Framework, ServiceKind, State, XdebugMode};
 use anyhow::Result;
 use crossterm::{
     event::{
@@ -144,6 +144,8 @@ pub struct App {
     pub pending_xdebug: Option<(String, XdebugMode)>,
     /// Service-picker modal (choose a kind to add), when open.
     pub service_picker: Option<ServicePicker>,
+    /// Per-service port modal (e.g. mailpit's SMTP/web-UI ports), when open.
+    pub service_ports: Option<ServicePortsModal>,
     /// Park manager modal, when open.
     pub park_modal: Option<ParkModal>,
     /// A queued service start that may need a (slow) brew install — run_loop
@@ -254,6 +256,16 @@ pub struct SettingsModal {
 /// `ServiceKind::all()`.
 pub struct ServicePicker {
     pub sel: usize,
+}
+
+/// Per-service port modal. `values` parallels `services::port_defs(kind)` —
+/// one text field per configurable port (mailpit has SMTP + web UI, the
+/// databases just one).
+pub struct ServicePortsModal {
+    pub kind: ServiceKind,
+    pub values: Vec<String>,
+    pub field: usize,
+    pub error: Option<String>,
 }
 
 /// Editable fields in the park manager (parks list, dir, server, php, ssl).
@@ -410,6 +422,7 @@ impl App {
             php_settings: None,
             pending_xdebug: None,
             service_picker: None,
+            service_ports: None,
             parked_unapplied: 0,
             park_modal: None,
             pending_service: None,
@@ -650,6 +663,7 @@ impl App {
             || self.config_modal.is_some()
             || self.php_settings.is_some()
             || self.service_picker.is_some()
+            || self.service_ports.is_some()
             || self.park_modal.is_some()
             || self.log_modal.is_some()
             || self.doctor_modal.is_some()
@@ -729,6 +743,10 @@ pub fn snapshot(width: u16, height: u16, modal: &str) -> Result<String> {
         "ext" => open_ext_modal(&mut app),
         "phpsettings" => open_php_settings(&mut app),
         "service" => app.service_picker = Some(ServicePicker { sel: 0 }),
+        "serviceports" => {
+            app.focus = Panel::Services;
+            open_service_ports(&mut app)
+        }
         "park" => open_park_modal(&mut app),
         "doctor" => open_doctor(&mut app),
         "anon" => app.anonymize = true,
@@ -939,6 +957,10 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         handle_service_picker_key(app, code);
         return;
     }
+    if app.service_ports.is_some() {
+        handle_service_ports_key(app, code);
+        return;
+    }
     if app.park_modal.is_some() {
         handle_park_key(app, code);
         return;
@@ -975,6 +997,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         },
         KeyCode::Char('s') if app.focus == Panel::Servers => open_settings(app),
         KeyCode::Char('s') if app.focus == Panel::Php => open_php_settings(app),
+        KeyCode::Char('s') if app.focus == Panel::Services => open_service_ports(app),
         KeyCode::Char('x') if app.focus == Panel::Servers => {
             if let Some(name) = app.selected_server_name() {
                 let r = ops::stop_server(&name).map(|_| format!("stopped '{name}'"));
@@ -2169,6 +2192,93 @@ fn handle_service_picker_key(app: &mut App, code: KeyCode) {
             }
         }
         _ => {}
+    }
+}
+
+/// Open the port editor for the selected service (mailpit's SMTP port is the
+/// usual reason: another mail catcher already owns :1025).
+fn open_service_ports(app: &mut App) {
+    let Some(inst) = app.state.services.get(app.sel_service).cloned() else {
+        return;
+    };
+    let values = crate::services::port_defs(inst.kind)
+        .iter()
+        .map(|d| inst.port(d.key, d.default).to_string())
+        .collect();
+    app.service_ports = Some(ServicePortsModal {
+        kind: inst.kind,
+        values,
+        field: 0,
+        error: None,
+    });
+}
+
+fn handle_service_ports_key(app: &mut App, code: KeyCode) {
+    let n = app
+        .service_ports
+        .as_ref()
+        .map(|m| m.values.len())
+        .unwrap_or(0)
+        .max(1);
+    let m = app.service_ports.as_mut().unwrap();
+    match code {
+        KeyCode::Esc => app.service_ports = None,
+        KeyCode::Enter => submit_service_ports(app),
+        KeyCode::Tab | KeyCode::Down => m.field = (m.field + 1) % n,
+        KeyCode::BackTab | KeyCode::Up => m.field = (m.field + n - 1) % n,
+        KeyCode::Backspace => {
+            if let Some(v) = m.values.get_mut(m.field) {
+                v.pop();
+            }
+        }
+        // Ports are digits only.
+        KeyCode::Char(c) if c.is_ascii_digit() => {
+            if let Some(v) = m.values.get_mut(m.field) {
+                v.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn submit_service_ports(app: &mut App) {
+    let m = app.service_ports.as_ref().unwrap();
+    let kind = m.kind;
+    let values = m.values.clone();
+    let defs = crate::services::port_defs(kind);
+
+    let result = (|| -> Result<(String, ops::PortChange)> {
+        // Parse every field before touching state, so a typo in the second
+        // port doesn't leave the first one half-applied.
+        let mut pairs = Vec::new();
+        for (def, val) in defs.iter().zip(values.iter()) {
+            let port: u16 = val
+                .trim()
+                .parse()
+                .map_err(|_| anyhow::anyhow!("{}: '{val}' is not a port number", def.label))?;
+            pairs.push((def.key, port));
+        }
+        let (inst, outcome) = ops::set_service_ports(kind, &pairs)?;
+        Ok((crate::services::ports_summary(&inst), outcome))
+    })();
+
+    match result {
+        Ok((summary, outcome)) => {
+            app.service_ports = None;
+            app.message = match outcome {
+                ops::PortChange::Restarted => format!("✓ {kind} restarted on {summary}"),
+                ops::PortChange::OnNextStart => {
+                    format!("✓ {kind} set to {summary} — press enter to start it")
+                }
+                ops::PortChange::Unchanged => format!("{kind} already on {summary}"),
+            };
+            app.refresh();
+        }
+        Err(e) => {
+            if let Some(m) = app.service_ports.as_mut() {
+                m.error = Some(e.to_string());
+            }
+        }
     }
 }
 

@@ -246,6 +246,18 @@ pub enum ServiceCommands {
     Restart { kind: String },
     /// List services and their status.
     List,
+    /// Show a service's configurable ports and their current values.
+    Ports { kind: String },
+    /// Re-point a service's port, e.g. `reeve service set mailpit smtp 1026`.
+    /// Single-port services (databases, redis, memcached) take the key `port`.
+    /// Restarts the service when it's running; the port is remembered in
+    /// `state.toml` and reused on every later start.
+    Set {
+        kind: String,
+        /// Port key — see `reeve service ports <kind>`.
+        key: String,
+        port: u16,
+    },
     /// Remove a service from state (leaves the brew formula installed).
     Remove { kind: String },
 }

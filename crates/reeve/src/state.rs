@@ -428,6 +428,27 @@ pub struct ManagedServiceInstance {
     pub kind: ServiceKind,
     #[serde(default)]
     pub enabled: bool,
+    /// Listening-port overrides, keyed by the service's port definitions (see
+    /// [`crate::services::port_defs`]). Absent keys use the formula's default
+    /// port, so a service nobody has re-pointed behaves exactly as before.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub ports: std::collections::BTreeMap<String, u16>,
+}
+
+impl ManagedServiceInstance {
+    /// A new instance on every default port, not yet started.
+    pub fn new(kind: ServiceKind) -> Self {
+        Self {
+            kind,
+            enabled: false,
+            ports: Default::default(),
+        }
+    }
+
+    /// The configured port for `key`, falling back to the service's default.
+    pub fn port(&self, key: &str, default: u16) -> u16 {
+        self.ports.get(key).copied().unwrap_or(default)
+    }
 }
 
 /// A parked directory: every immediate subfolder with web content is served
@@ -627,15 +648,18 @@ mod tests {
     #[test]
     fn services_survive_toml_roundtrip() {
         let mut s = State::default();
-        s.services.push(ManagedServiceInstance {
-            kind: ServiceKind::Mailpit,
-            enabled: true,
-        });
+        let mut svc = ManagedServiceInstance::new(ServiceKind::Mailpit);
+        svc.enabled = true;
+        svc.ports.insert("smtp".into(), 1026);
+        s.services.push(svc);
         let toml = toml::to_string_pretty(&s).unwrap();
         let back: State = toml::from_str(&toml).unwrap();
         assert_eq!(back.services.len(), 1);
         assert_eq!(back.services[0].kind, ServiceKind::Mailpit);
         assert!(back.services[0].enabled);
+        // The override survives; untouched ports still read their default.
+        assert_eq!(back.services[0].port("smtp", 1025), 1026);
+        assert_eq!(back.services[0].port("ui", 8025), 8025);
     }
 
     #[test]

@@ -39,6 +39,8 @@ the thing the old switcher-script approach can't do.
 - **Run several servers at once**, on different ports, managed independently.
 - **Background services** — install/start/stop **MySQL, MariaDB, PostgreSQL,
   Redis, memcached, Mailpit** via Homebrew + launchd/systemd, alongside the web stack.
+  Each one's listening ports are configurable and remembered, so a service can
+  share the machine with another tool that already owns its default port.
 - **Framework presets** — `laravel`, `wordpress`, `symfony`, `grav`, `drupal`
   set the right docroot + rewrites automatically, `public` serves any app from
   its `public/` subdir; or point a vhost at an upstream dev server as a
@@ -138,6 +140,7 @@ Add a database and a mail catcher, tune PHP, or use a framework preset:
 ```bash
 reeve service add mysql && reeve service start mysql   # MySQL on :3306
 reeve service add mailpit && reeve service start mailpit  # SMTP :1025, UI :8025
+reeve service set mailpit smtp 1026                    # move SMTP off a port another catcher owns
 reeve php set 8.3 memory_limit 512M                    # tune php.ini
 reeve php xdebug 8.3 debug                              # Xdebug, attaches on XDEBUG_SESSION
 reeve vhost add shop.test --root ~/Sites/shop --php 8.3 --server caddy --ssl --preset laravel
@@ -209,10 +212,10 @@ reeve
 ├ PHP ──────────────────────────────────────────────────┤
 │ 8.3★ ● running  debug    8.4 ● running                │
 ├ Services ─────────────────────────────────────────────┤
-│ › mysql      :3306   ● running                        │
-│   mailpit    :8025   ● running                        │
+│ › mysql      :3306        ● running                   │
+│   mailpit    :1025/:8025  ● running                   │
 └───────────────────────────────────────────────────────┘
- enter start · x stop · r restart · n new · s settings · L log · q quit
+ enter start · x stop · r restart · n new · s ports · L log · q quit
 ```
 
 Navigation is shared across panels; the key bar is context-aware (it shows the
@@ -228,7 +231,7 @@ keys for the focused panel).
 | `e` | Edit — server (ports, backend, default site) / vhost / PHP extensions |
 | `Enter` | Start server or service / restart FPM master |
 | `x` · `r` | Stop · restart (Servers, Services) |
-| `s` | Per-backend settings (Servers) / per-version PHP settings (PHP) |
+| `s` | Per-backend settings (Servers) / per-version PHP settings (PHP) / listening ports (Services) |
 | `X` | Cycle Xdebug off→debug→profile (PHP panel) |
 | `d` | Set default PHP version (PHP panel) |
 | `p` | Park a directory / manage parks (Vhosts or Parked panel) |
@@ -293,6 +296,7 @@ minutes, and survives closing/reopening the view.
 | `vhost list\|remove <host>` | Manage vhosts |
 | `vhost show <host>` | Show how a host is served: docroot, preset, PHP, and its `.reeve.toml` |
 | `service add\|start\|stop\|restart\|remove\|list <kind>` | Manage databases / redis / memcached / mailpit |
+| `service ports <kind>` / `service set <kind> <key> <port>` | Show / re-point a service's listening ports (mailpit takes `smtp` and `ui`; the rest take `port`) |
 | `park add <dir> --server <name> --php <ver> [--tld T] [--ssl]` | Auto-serve every subfolder as `<folder>.<tld>` |
 | `park list\|remove <dir>` | Manage parked directories |
 | `apply` | Render generated configs + reconcile running services |

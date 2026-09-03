@@ -2,6 +2,11 @@
 
 All notable changes to reeve are documented here.
 
+## 1.0.2
+
+### Added
+- **Managed services' listening ports are configurable and remembered.** Mailpit's SMTP port is the one that bites — plenty of machines already run another mail catcher on `:1025` — but every service is covered: mailpit takes `smtp` and `ui`, the databases, Redis and memcached take `port`. Set one with `reeve service set mailpit smtp 1026`, or press **`s`** on the Services panel in the dashboard; `reeve service ports <kind>` lists the keys, current values and defaults. The port is stored in `state.toml`, passed to the service on every start, and used for reeve's own health probe and port-handoff check, so it survives restarts and reboots. A running service is restarted on the spot; a stopped one picks the new port up when it starts. Ports already claimed by another reeve service, a web server or an unrelated process are rejected before anything is saved, and a service left alone keeps tracking the Homebrew formula's own default.
+
 ## 1.0.1
 
 ### Fixed

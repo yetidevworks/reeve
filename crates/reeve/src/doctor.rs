@@ -257,13 +257,16 @@ pub fn run(brew: Option<&Brew>, cfg: &Config, state: &State) -> Vec<Check> {
         }
         if svc.enabled {
             let (health, detail) = match daemon::status(&id) {
-                Status::Running if services::health(svc.kind) => (
+                Status::Running if services::health(svc) => (
                     Health::Ok,
-                    format!("running, port {} open", services::port(svc.kind)),
+                    format!("running, {} open", services::ports_summary(svc)),
                 ),
                 Status::Running => (
                     Health::Warn,
-                    format!("up but port {} not answering yet", services::port(svc.kind)),
+                    format!(
+                        "up but port {} not answering yet",
+                        services::primary_port(svc)
+                    ),
                 ),
                 Status::Stopped => (Health::Warn, "enabled but not running".to_string()),
                 Status::Error => (Health::Fail, "crashed — check `reeve logs`".to_string()),

@@ -796,11 +796,11 @@ fn cmd_service(c: ServiceCommands) -> Result<()> {
             if let Some(note) = &out.handoff {
                 println!("  ↪ {note}");
             }
-            println!(
-                "✓ Started '{kind}' on :{} — {}",
-                services::port(kind),
-                out.status.as_str()
-            );
+            let summary = load_state()?
+                .get_service(kind)
+                .map(services::ports_summary)
+                .unwrap_or_default();
+            println!("✓ Started '{kind}' on {summary} — {}", out.status.as_str());
             Ok(())
         }
         ServiceCommands::Stop { kind } => {
@@ -829,17 +829,52 @@ fn cmd_service(c: ServiceCommands) -> Result<()> {
                 );
                 return Ok(());
             }
-            println!("{:<12} {:<7} {:<9} STATUS", "SERVICE", "PORT", "ENABLED");
+            println!("{:<12} {:<12} {:<9} STATUS", "SERVICE", "PORTS", "ENABLED");
             for s in &state.services {
                 let status = daemon::status(&services::service_id(s.kind));
                 println!(
-                    "{:<12} {:<7} {:<9} {}",
+                    "{:<12} {:<12} {:<9} {}",
                     s.kind,
-                    services::port(s.kind),
+                    services::ports_display(s),
                     if s.enabled { "yes" } else { "no" },
                     status.as_str()
                 );
             }
+            Ok(())
+        }
+        ServiceCommands::Ports { kind } => {
+            let kind = ServiceKind::from_str(&kind)?;
+            let state = load_state()?;
+            let inst = state
+                .get_service(kind)
+                .cloned()
+                .unwrap_or_else(|| state::ManagedServiceInstance::new(kind));
+            println!("{:<8} {:<8} DESCRIPTION", "KEY", "PORT");
+            for d in services::port_defs(kind) {
+                println!(
+                    "{:<8} {:<8} {} — {} (default {})",
+                    d.key,
+                    inst.port(d.key, d.default),
+                    d.label,
+                    d.help,
+                    d.default
+                );
+            }
+            println!("\nChange one with `reeve service set {kind} <key> <port>`.");
+            Ok(())
+        }
+        ServiceCommands::Set { kind, key, port } => {
+            let kind = ServiceKind::from_str(&kind)?;
+            let (inst, outcome) = ops::set_service_port(kind, &key, port)?;
+            let note = match outcome {
+                ops::PortChange::Restarted => "restarted",
+                ops::PortChange::OnNextStart => "takes effect on next start",
+                ops::PortChange::Unchanged => "unchanged",
+            };
+            println!(
+                "✓ {kind} now on {} ({note})",
+                services::ports_summary(&inst),
+            );
             Ok(())
         }
     }

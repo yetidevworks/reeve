@@ -11,8 +11,8 @@ use crate::probe::{self, PortState};
 use crate::services;
 use crate::ssl;
 use crate::state::{
-    load_state, save_state, ManagedServiceInstance, PhpVersion as Php, Server, ServiceKind, Vhost,
-    XdebugMode,
+    load_state, save_state, ManagedServiceInstance, PhpVersion as Php, Server, ServiceKind, State,
+    Vhost, XdebugMode,
 };
 use anyhow::{anyhow, bail, Result};
 
@@ -174,27 +174,42 @@ fn preflight_ports(server: &Server) -> Result<Option<String>> {
     Ok(note)
 }
 
-/// Same handoff as [`preflight_ports`], for a managed service's single port.
-fn preflight_service(kind: ServiceKind) -> Result<Option<String>> {
-    let port = services::port(kind);
-    let our = daemon::pid(&services::service_id(kind));
-    if probe::first_foreign(&[port], our).is_none() {
+/// Same handoff as [`preflight_ports`], across every port a managed service
+/// binds (mailpit, for one, listens on both SMTP and its web UI).
+fn preflight_service(inst: &ManagedServiceInstance) -> Result<Option<String>> {
+    let ports = services::ports(inst);
+    let our = daemon::pid(&services::service_id(inst.kind));
+    if probe::first_foreign(&ports, our).is_none() {
         return Ok(None);
     }
     let mut note = None;
     if let Ok(brew) = Brew::detect() {
-        note = reclaim_from_brew(&brew, services::formula(kind));
+        note = reclaim_from_brew(&brew, services::formula(inst.kind));
         if note.is_some() {
-            wait_port_release(&[port], our);
+            wait_port_release(&ports, our);
         }
     }
-    if let Some((port, pid, name)) = probe::first_foreign(&[port], our) {
+    if let Some((port, pid, name)) = probe::first_foreign(&ports, our) {
         bail!(
             "Port {port} is already in use by '{name}' (pid {pid}), which reeve doesn't manage. \
-             Stop it (e.g. `brew services stop {name}`), then retry."
+             Stop it (e.g. `brew services stop {name}`), or point {} at another port \
+             (`reeve service set {} <port>`), then retry.",
+            inst.kind,
+            port_hint(inst, port),
         );
     }
     Ok(note)
+}
+
+/// `<kind> <key>` for the port that collided, so the error names the exact
+/// command that moves it out of the way.
+fn port_hint(inst: &ManagedServiceInstance, port: u16) -> String {
+    let key = services::port_defs(inst.kind)
+        .iter()
+        .find(|d| inst.port(d.key, d.default) == port)
+        .map(|d| d.key)
+        .unwrap_or("port");
+    format!("{} {key}", inst.kind)
 }
 
 /// Flip a server's enabled flag and persist.
@@ -389,11 +404,126 @@ pub fn set_xdebug(version: &str, mode: XdebugMode) -> Result<()> {
 pub fn add_service(kind: ServiceKind) -> Result<()> {
     let mut state = load_state()?;
     if state.get_service(kind).is_none() {
-        state.services.push(ManagedServiceInstance {
-            kind,
-            enabled: false,
-        });
+        state.services.push(ManagedServiceInstance::new(kind));
         save_state(&state)?;
+    }
+    Ok(())
+}
+
+/// What a [`set_service_ports`] call actually did, so callers can say so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortChange {
+    /// The service was running, so it was restarted onto the new port.
+    Restarted,
+    /// The service is stopped; it binds the new port on its next start.
+    OnNextStart,
+    /// The ports were already what was asked for.
+    Unchanged,
+}
+
+/// Set one of a service's listening ports (see [`set_service_ports`]).
+pub fn set_service_port(
+    kind: ServiceKind,
+    key: &str,
+    port: u16,
+) -> Result<(ManagedServiceInstance, PortChange)> {
+    set_service_ports(kind, &[(key, port)])
+}
+
+/// Re-point a service's listening ports, persist them, and restart the service
+/// if it's currently running so the change takes effect immediately. Returns
+/// the saved instance plus whether it was restarted. Registers the service in
+/// state first if it isn't there yet, so a port can be set before a first start.
+pub fn set_service_ports(
+    kind: ServiceKind,
+    ports: &[(&str, u16)],
+) -> Result<(ManagedServiceInstance, PortChange)> {
+    let mut state = load_state()?;
+    let mut inst = state
+        .get_service(kind)
+        .cloned()
+        .unwrap_or_else(|| ManagedServiceInstance::new(kind));
+    for (key, port) in ports {
+        services::check_port_key(kind, key)?;
+        if *port == 0 {
+            bail!("Port must be between 1 and 65535");
+        }
+        match services::default_port(kind, key) {
+            // Store only non-default ports, so state.toml stays minimal and a
+            // service nobody re-pointed keeps tracking the formula's default.
+            Some(d) if d == *port => inst.ports.remove(*key),
+            _ => inst.ports.insert(key.to_string(), *port),
+        };
+    }
+    check_service_ports_free(&state, &inst)?;
+
+    let changed = match state.get_service(kind) {
+        Some(existing) => existing.ports != inst.ports,
+        None => true,
+    };
+    // Refuse a port some other process already holds *before* saving, so a
+    // rejected change never leaves state claiming a port nothing can bind.
+    // Only newly-taken ports are probed: one the service already binds itself
+    // would read as in-use every time.
+    let held = state
+        .get_service(kind)
+        .map(services::ports)
+        .unwrap_or_default();
+    let moved: Vec<u16> = services::ports(&inst)
+        .into_iter()
+        .filter(|p| !held.contains(p))
+        .collect();
+    let our = daemon::pid(&services::service_id(kind));
+    if let Some((port, pid, name)) = probe::first_foreign(&moved, our) {
+        bail!(
+            "Port {port} is already in use by '{name}' (pid {pid}). \
+             Pick another port, or stop that process first."
+        );
+    }
+    match state.services.iter_mut().find(|s| s.kind == kind) {
+        Some(s) => s.ports = inst.ports.clone(),
+        None => state.services.push(inst.clone()),
+    }
+    save_state(&state)?;
+
+    // A stopped service just picks the ports up on its next start; a running
+    // one has them baked into its launchd job, so it needs restarting.
+    let running = matches!(
+        daemon::status(&services::service_id(kind)),
+        Status::Running | Status::Error
+    );
+    let outcome = match (changed, running) {
+        (false, _) => PortChange::Unchanged,
+        (true, false) => PortChange::OnNextStart,
+        (true, true) => {
+            restart_service(kind)?;
+            PortChange::Restarted
+        }
+    };
+    Ok((inst, outcome))
+}
+
+/// Reject a port another managed service or web server already claims, or that
+/// the service would bind twice — collisions otherwise only appear later as a
+/// crash-looping launchd job.
+fn check_service_ports_free(state: &State, inst: &ManagedServiceInstance) -> Result<()> {
+    let mine = services::ports(inst);
+    for (i, port) in mine.iter().enumerate() {
+        if mine[..i].contains(port) {
+            bail!("Port {port} is used twice by {}", inst.kind);
+        }
+        for other in state.services.iter().filter(|s| s.kind != inst.kind) {
+            if services::ports(other).contains(port) {
+                bail!("Port {port} is already used by service '{}'", other.kind);
+            }
+        }
+        if let Some(srv) = state
+            .servers
+            .iter()
+            .find(|s| s.http_port == *port || s.https_port == *port)
+        {
+            bail!("Port {port} is already used by server '{}'", srv.name);
+        }
     }
     Ok(())
 }
@@ -404,20 +534,25 @@ pub fn add_service(kind: ServiceKind) -> Result<()> {
 pub fn start_service(kind: ServiceKind) -> Result<Started> {
     let brew = Brew::detect()?;
     services::ensure_installed(&brew, kind)?;
-    // A leftover `brew services` copy (e.g. `brew services start redis`) would
-    // hold the port and make reeve's foreground master crash-loop; hand off.
-    let handoff = preflight_service(kind)?;
-    let spec = services::service_spec(&brew, kind)?;
-    daemon::install(&spec)?;
-    daemon::restart(&services::service_id(kind))?;
     let mut state = load_state()?;
     match state.services.iter_mut().find(|s| s.kind == kind) {
         Some(s) => s.enabled = true,
-        None => state.services.push(ManagedServiceInstance {
-            kind,
-            enabled: true,
-        }),
+        None => {
+            let mut inst = ManagedServiceInstance::new(kind);
+            inst.enabled = true;
+            state.services.push(inst);
+        }
     }
+    let inst = state
+        .get_service(kind)
+        .cloned()
+        .expect("just ensured present");
+    // A leftover `brew services` copy (e.g. `brew services start redis`) would
+    // hold the port and make reeve's foreground master crash-loop; hand off.
+    let handoff = preflight_service(&inst)?;
+    let spec = services::service_spec(&brew, &inst)?;
+    daemon::install(&spec)?;
+    daemon::restart(&services::service_id(kind))?;
     save_state(&state)?;
     Ok(Started {
         status: daemon::status(&services::service_id(kind)),
@@ -438,8 +573,13 @@ pub fn stop_service(kind: ServiceKind) -> Result<()> {
 /// Restart a service's launchd master (re-installs the spec first).
 pub fn restart_service(kind: ServiceKind) -> Result<Status> {
     let brew = Brew::detect()?;
-    preflight_service(kind)?;
-    let spec = services::service_spec(&brew, kind)?;
+    let state = load_state()?;
+    let inst = state
+        .get_service(kind)
+        .cloned()
+        .unwrap_or_else(|| ManagedServiceInstance::new(kind));
+    preflight_service(&inst)?;
+    let spec = services::service_spec(&brew, &inst)?;
     daemon::install(&spec)?;
     daemon::restart(&services::service_id(kind))?;
     Ok(daemon::status(&services::service_id(kind)))

@@ -132,6 +132,9 @@ pub fn render(f: &mut Frame, app: &App) {
     if app.service_picker.is_some() {
         render_service_picker(f, app);
     }
+    if app.service_ports.is_some() {
+        render_service_ports_modal(f, app);
+    }
     if app.park_modal.is_some() {
         render_park_modal(f, app);
     }
@@ -493,6 +496,54 @@ fn render_php_settings_modal(f: &mut Frame, app: &App) {
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
+fn render_service_ports_modal(f: &mut Frame, app: &App) {
+    let m = app.service_ports.as_ref().unwrap();
+    let defs = crate::services::port_defs(m.kind);
+    let area = centered_rect(74, defs.len() as u16 + 6, f.area());
+    f.render_widget(Clear, area);
+
+    let mut lines = vec![Line::raw("")];
+    for (i, def) in defs.iter().enumerate() {
+        let active = m.field == i;
+        let marker = if active { "› " } else { "  " };
+        let val = m.values.get(i).cloned().unwrap_or_default();
+        let cursor = if active { format!("{val}▏") } else { val };
+        let vstyle = if active {
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(vec![
+            Span::raw(format!("{marker}{:<16}", format!("{}:", def.label))),
+            Span::styled(format!("{cursor:<8}"), vstyle),
+            Span::styled(
+                format!(" (default {} — {})", def.default, def.help),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    }
+    lines.push(Line::raw(""));
+    if let Some(err) = &m.error {
+        lines.push(Line::from(Span::styled(
+            format!("  {err}"),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        "  tab/↑↓ field · type to edit · enter save+restart · esc cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .title(Span::styled(
+            format!(" {} ports ", m.kind),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
 fn render_server_wizard(f: &mut Frame, app: &App) {
     let w = app.server_wizard.as_ref().unwrap();
     let area = centered_rect(62, 13, f.area());
@@ -651,6 +702,7 @@ fn render_keys(f: &mut Frame, app: &App, area: Rect) {
             ("x", "stop"),
             ("r", "restart"),
             ("n", "add"),
+            ("s", "ports"),
             ("R/del", "remove"),
             ("L", "log"),
             ("c", "config"),
@@ -1131,11 +1183,18 @@ fn render_services(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             .get(i)
             .copied()
             .unwrap_or(Status::Stopped);
+        // Colon-prefix each port so the row reads like the Servers panel
+        // (mailpit binds two: SMTP and its web UI).
+        let ports = crate::services::ports(s)
+            .iter()
+            .map(|p| format!(":{p}"))
+            .collect::<Vec<_>>()
+            .join("/");
         let head = format!(
-            " {} {:<11} :{:<6} ",
+            " {} {:<11} {:<12} ",
             if sel && focused { "›" } else { " " },
             s.kind,
-            crate::services::port(s.kind),
+            ports,
         );
         lines.push(
             Line::from(vec![Span::raw(head), status_span(status)]).style(row_style(sel, focused)),
