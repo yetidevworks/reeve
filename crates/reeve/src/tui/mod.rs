@@ -139,6 +139,8 @@ pub struct App {
     pub config_modal: Option<ConfigModal>,
     /// Per-version PHP settings modal (php.ini / OPcache / FPM pool), when open.
     pub php_settings: Option<PhpSettingsModal>,
+    /// Apache module picker for the selected server, when open.
+    pub modules_modal: Option<ModulesModal>,
     /// A queued Xdebug enable that needs a (slow) pecl install — run_loop
     /// suspends the TUI to show output, like `pending_ext`.
     pub pending_xdebug: Option<(String, XdebugMode)>,
@@ -250,6 +252,64 @@ pub struct SettingsModal {
     pub values: Vec<String>,
     pub field: usize,
     pub error: Option<String>,
+}
+
+/// One row of the Apache module picker.
+pub struct ModuleRow {
+    pub name: String,
+    /// Chosen explicitly on this server.
+    pub enabled: bool,
+    /// Pulled in as another choice's prerequisite rather than picked directly.
+    pub implied: bool,
+    /// Part of reeve's always-on base set (or the auto-on SSL pair), so it
+    /// can't be toggled.
+    pub locked: bool,
+}
+
+/// Apache module picker for one server: the whole shipped catalog, filterable,
+/// with space toggling a row. Apache-only — the other backends compile their
+/// modules in.
+pub struct ModulesModal {
+    pub server_name: String,
+    /// Full catalog, alphabetical. `mpm_*` is excluded upstream.
+    pub rows: Vec<ModuleRow>,
+    /// Typed text narrowing the list.
+    pub filter: String,
+    /// Index into the *filtered* view, not into `rows`.
+    pub sel: usize,
+    pub error: Option<String>,
+    /// Set while the (re)render + restart runs, so the modal can say so.
+    pub busy: bool,
+}
+
+impl ModulesModal {
+    /// Indices into `rows` matching the current filter.
+    pub fn visible(&self) -> Vec<usize> {
+        let f = self.filter.trim().to_lowercase();
+        self.rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| f.is_empty() || r.name.contains(&f))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Modules explicitly chosen — what gets persisted.
+    pub fn chosen(&self) -> Vec<String> {
+        self.rows
+            .iter()
+            .filter(|r| r.enabled && !r.locked)
+            .map(|r| r.name.clone())
+            .collect()
+    }
+
+    /// Recompute which rows are only on because something else needs them.
+    pub fn recompute_implied(&mut self) {
+        let effective = crate::backends::apache_modules::with_prereqs(&self.chosen());
+        for r in self.rows.iter_mut() {
+            r.implied = !r.enabled && !r.locked && effective.contains(&r.name);
+        }
+    }
 }
 
 /// Service-picker modal: choose a service kind to add + start. `sel` indexes
@@ -417,6 +477,7 @@ impl App {
             dns_ok: false,
             confirm_remove_server: None,
             ext_modal: None,
+            modules_modal: None,
             pending_ext: None,
             config_modal: None,
             php_settings: None,
@@ -660,6 +721,7 @@ impl App {
             || self.settings_modal.is_some()
             || self.php_install.is_some()
             || self.ext_modal.is_some()
+            || self.modules_modal.is_some()
             || self.config_modal.is_some()
             || self.php_settings.is_some()
             || self.service_picker.is_some()
@@ -741,6 +803,7 @@ pub fn snapshot(width: u16, height: u16, modal: &str) -> Result<String> {
             })
         }
         "ext" => open_ext_modal(&mut app),
+        "modules" => open_modules_modal(&mut app),
         "phpsettings" => open_php_settings(&mut app),
         "service" => app.service_picker = Some(ServicePicker { sel: 0 }),
         "serviceports" => {
@@ -945,6 +1008,10 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         handle_ext_key(app, code);
         return;
     }
+    if app.modules_modal.is_some() {
+        handle_modules_key(app, code);
+        return;
+    }
     if app.config_modal.is_some() {
         handle_config_key(app, code);
         return;
@@ -996,6 +1063,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             Panel::Services => start_selected_service(app),
         },
         KeyCode::Char('s') if app.focus == Panel::Servers => open_settings(app),
+        KeyCode::Char('m') if app.focus == Panel::Servers => open_modules_modal(app),
         KeyCode::Char('s') if app.focus == Panel::Php => open_php_settings(app),
         KeyCode::Char('s') if app.focus == Panel::Services => open_service_ports(app),
         KeyCode::Char('x') if app.focus == Panel::Servers => {
@@ -1638,6 +1706,7 @@ fn submit_server_wizard(app: &mut App) {
                     default_preset,
                     default_root,
                     settings: Default::default(),
+                    modules: Vec::new(),
                 })?;
                 crate::state::save_state(&state)?;
                 Ok(format!(
@@ -1791,6 +1860,138 @@ fn handle_ext_key(app: &mut App, code: KeyCode) {
         }
         KeyCode::Char(c) if c.is_ascii_alphanumeric() || c == '_' || c == '-' => m.input.push(c),
         _ => {}
+    }
+}
+
+/// Open the Apache module picker for the selected server.
+fn open_modules_modal(app: &mut App) {
+    let Some(server) = app.state.servers.get(app.sel_server).cloned() else {
+        app.message = "No server selected".into();
+        return;
+    };
+    if server.backend != crate::state::Backend::Apache {
+        // nginx modules are compile-time and Caddy needs an xcaddy rebuild, so
+        // there's genuinely nothing to pick for the other backends.
+        app.message = format!("{} has no loadable modules — Apache only", server.backend);
+        return;
+    }
+    let catalog = match Brew::detect()
+        .and_then(|brew| crate::backends::apache_modules::catalog(&brew, &server))
+    {
+        Ok(c) => c,
+        Err(e) => {
+            app.message = format!("✗ modules: {e}");
+            return;
+        }
+    };
+    use crate::backends::apache_modules::Origin;
+    let rows = catalog
+        .into_iter()
+        .map(|m| ModuleRow {
+            locked: m.origin != Origin::Optional,
+            enabled: m.enabled || m.origin != Origin::Optional,
+            implied: m.implied,
+            name: m.name,
+        })
+        .collect();
+    app.modules_modal = Some(ModulesModal {
+        server_name: server.name,
+        rows,
+        filter: String::new(),
+        sel: 0,
+        error: None,
+        busy: false,
+    });
+}
+
+/// Key handling for the module picker: type to filter, ↑↓ to move, space to
+/// toggle, enter to save + apply.
+fn handle_modules_key(app: &mut App, code: KeyCode) {
+    let m = app.modules_modal.as_mut().unwrap();
+    m.error = None;
+    let vis = m.visible();
+    match code {
+        KeyCode::Esc => app.modules_modal = None,
+        KeyCode::Enter => submit_modules(app),
+        KeyCode::Up => m.sel = m.sel.saturating_sub(1),
+        KeyCode::Down if !vis.is_empty() => m.sel = (m.sel + 1).min(vis.len() - 1),
+        KeyCode::PageUp => m.sel = m.sel.saturating_sub(10),
+        KeyCode::PageDown if !vis.is_empty() => m.sel = (m.sel + 10).min(vis.len() - 1),
+        KeyCode::Home => m.sel = 0,
+        KeyCode::End if !vis.is_empty() => m.sel = vis.len() - 1,
+        // Module names never contain a space, so space is free to mean toggle.
+        KeyCode::Char(' ') => {
+            let Some(&idx) = vis.get(m.sel) else { return };
+            if m.rows[idx].locked {
+                m.error = Some(format!("{} is always loaded", m.rows[idx].name));
+                return;
+            }
+            m.rows[idx].enabled = !m.rows[idx].enabled;
+            // Turning something off that another choice needs would only fail
+            // at validate time, so say so here and put it back.
+            if !m.rows[idx].enabled {
+                let name = m.rows[idx].name.clone();
+                let deps = crate::backends::apache_modules::dependents_of(&name, &m.chosen());
+                if !deps.is_empty() {
+                    m.rows[idx].enabled = true;
+                    m.error = Some(format!("{name} is required by {}", deps.join(", ")));
+                    return;
+                }
+            }
+            m.recompute_implied();
+        }
+        KeyCode::Backspace => {
+            m.filter.pop();
+            m.sel = 0;
+        }
+        KeyCode::Char(c) if c.is_ascii_alphanumeric() || c == '_' => {
+            m.filter.push(c.to_ascii_lowercase());
+            m.sel = 0;
+        }
+        _ => {}
+    }
+}
+
+/// Persist the picker's selection and re-render. `ops` rolls the choice back
+/// if httpd rejects the resulting config, so a bad pick can't strand a server.
+fn submit_modules(app: &mut App) {
+    let m = app.modules_modal.as_ref().unwrap();
+    let name = m.server_name.clone();
+    let chosen = m.chosen();
+    if let Some(m) = app.modules_modal.as_mut() {
+        m.busy = true;
+    }
+    match ops::set_apache_modules(&name, chosen) {
+        Ok(change) => {
+            app.modules_modal = None;
+            let mut note = String::new();
+            if !change.added.is_empty() {
+                note.push_str(&format!(" +{}", change.added.join(" +")));
+            }
+            if !change.removed.is_empty() {
+                note.push_str(&format!(" -{}", change.removed.join(" -")));
+            }
+            if note.is_empty() {
+                app.message = format!("modules unchanged for '{name}'");
+            } else {
+                app.message = format!(
+                    "✓ '{name}' modules:{note}{}",
+                    if change.restarted {
+                        " — restarted"
+                    } else {
+                        // Already rendered + validated; it just isn't running.
+                        " — saved; start the server to load them"
+                    }
+                );
+            }
+            app.refresh();
+        }
+        Err(e) => {
+            if let Some(m) = app.modules_modal.as_mut() {
+                m.busy = false;
+                m.error = Some(e.to_string());
+            }
+        }
     }
 }
 

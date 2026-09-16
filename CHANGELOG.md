@@ -2,6 +2,19 @@
 
 All notable changes to reeve are documented here.
 
+## 1.1.0
+
+### Added
+- **Apache modules are now managed from reeve.** Homebrew's httpd ships around 110 modules and reeve loaded a fixed 14 of them, with no way to change that short of editing a generated file reeve overwrites on every apply. Now every server instance carries its own list: `reeve server mod list <name>` shows what's loaded and where it came from (`--all` for the whole catalog), `reeve server mod add <name> <module>` enables one, and `reeve server mod remove` turns it off again. In the dashboard, **`m`** on the Servers panel opens a filterable picker — type to narrow, space to toggle, enter to save. Module names are accepted in any spelling you'd naturally type (`deflate`, `mod_deflate`, `mod_deflate.so`, `deflate_module`), and a typo gets a "did you mean" rather than a dead end. Your picks live in `state.toml` and survive every re-render.
+- **Prerequisites are resolved for you.** Apache doesn't chase module dependencies itself — you find out with a failed config test or an "Invalid command" 500 at request time. Enabling `mod_deflate` also loads `mod_filter` (without which `AddOutputFilterByType` isn't a valid directive), `lbmethod_byrequests` pulls in `mod_proxy_balancer`, `mod_proxy` and `mod_slotmem_shm`, `mod_dav_fs` pulls in `mod_dav`, and so on down a transitive table. Removal is guarded the same way: turning off something another enabled module needs is refused with the name of what needs it, instead of producing a config that won't start.
+- **`mod_status` and `mod_info` arrive configured.** Both are inert without a handler location, so enabling them also renders one — `/server-status` and `/server-info`, restricted to local requests.
+- **A bad module choice can't strand a server.** Every change is validated with `httpd -t` before it sticks; if the config doesn't pass, the selection is rolled back and the old config re-rendered, so you get an error message rather than a server that won't come up.
+
+### Fixed
+- **A `.htaccess` using `Redirect` no longer 500s.** `mod_alias` wasn't in the base module set, so a bare `Redirect 301 /old /new` — ordinary in WordPress, Grav and plenty of legacy sites — failed with `Invalid command 'Redirect'` on every request. Since reeve renders `AllowOverride All` on every vhost, it was inviting .htaccess files it couldn't actually serve. `mod_alias` is now always loaded, as it is in Homebrew's own stock httpd.conf.
+- **`Options Indexes` actually produces a directory listing.** Every vhost has always rendered it, but `mod_autoindex` wasn't loaded, so a directory with no index file returned 404 instead of a listing. It's now part of the base set.
+- **Only one MPM, always.** `mpm_prefork` and `mpm_worker` are kept out of the pickable catalog entirely: loading a second MPM alongside reeve's `mpm_event` is a hard startup failure (`AH00534: More than one MPM loaded`), not something you'd want to discover after an apply.
+
 ## 1.0.2
 
 ### Added

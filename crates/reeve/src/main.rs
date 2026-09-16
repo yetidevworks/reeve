@@ -22,11 +22,12 @@ mod update;
 mod vhost;
 
 use anyhow::{Context, Result};
+use backends::apache_modules::Origin;
 use backends::{backend_for, server_service_id};
 use clap::Parser;
 use cli::{
-    Cli, Commands, DnsCommands, ParkCommands, PhpCommands, ServerCommands, ServiceCommands,
-    SslCommands, VhostCommands,
+    Cli, Commands, DnsCommands, ModCommands, ParkCommands, PhpCommands, ServerCommands,
+    ServiceCommands, SslCommands, VhostCommands,
 };
 use config::{load_config, save_config, Config};
 use state::{load_state, save_state, Backend, Server, Vhost};
@@ -593,6 +594,7 @@ fn cmd_server(c: ServerCommands) -> Result<()> {
                     .filter(|r| !r.trim().is_empty())
                     .map(|r| expand_tilde(r.trim())),
                 settings: Default::default(),
+                modules: Vec::new(),
             })?;
             save_state(&state)?;
             // Install the backend's brew formula now (visible), rather than
@@ -653,6 +655,81 @@ fn cmd_server(c: ServerCommands) -> Result<()> {
         ServerCommands::Restart { name } => {
             let status = ops::restart_server(&name)?;
             println!("✓ Restarted '{name}' — {}", status.as_str());
+            Ok(())
+        }
+        ServerCommands::Mod(c) => cmd_server_mod(c),
+    }
+}
+
+/// Report what a module change did, shared by `mod add` and `mod remove`.
+fn report_module_change(name: &str, change: &ops::ModuleChange) {
+    for m in &change.added {
+        println!("  + {m}");
+    }
+    for m in &change.removed {
+        println!("  - {m}");
+    }
+    if change.restarted {
+        println!("  Restarted '{name}' — live now.");
+    } else {
+        // The conf is already rendered and `httpd -t`-clean at this point;
+        // the only thing left is a server that isn't currently serving.
+        println!("  Config written and validated. Start '{name}' to load them.");
+    }
+}
+
+fn cmd_server_mod(c: ModCommands) -> Result<()> {
+    match c {
+        ModCommands::List { name, all } => {
+            let server = ops::require_server(&name)?;
+            if server.backend != Backend::Apache {
+                anyhow::bail!(
+                    "'{name}' is a {} server — module management is Apache-only.",
+                    server.backend
+                );
+            }
+            let brew = brew::Brew::detect_or_offer_install()?;
+            let catalog = backends::apache_modules::catalog(&brew, &server)?;
+            let shown: Vec<_> = catalog
+                .iter()
+                .filter(|m| all || m.enabled || m.implied || m.origin != Origin::Optional)
+                .collect();
+            println!("{:<30} {:<9} SOURCE", "MODULE", "LOADED");
+            for m in &shown {
+                let loaded = match (m.origin, m.enabled, m.implied) {
+                    (Origin::Base, _, _) | (Origin::Ssl, _, _) => "yes",
+                    (_, true, _) => "yes",
+                    (_, _, true) => "yes",
+                    _ => "no",
+                };
+                let source = match (m.origin, m.enabled, m.implied) {
+                    (Origin::Base, _, _) => "base (always on)".to_string(),
+                    (Origin::Ssl, _, _) => "ssl (auto when HTTPS)".to_string(),
+                    (_, true, _) => "enabled".to_string(),
+                    (_, _, true) => "required by another module".to_string(),
+                    _ => "available".to_string(),
+                };
+                println!("{:<30} {loaded:<9} {source}", m.name);
+            }
+            if !all {
+                let total = catalog.len();
+                println!(
+                    "\n{} of {total} modules shown — `reeve server mod list {name} --all` for the rest.",
+                    shown.len()
+                );
+            }
+            Ok(())
+        }
+        ModCommands::Add { name, module } => {
+            let change = ops::add_apache_module(&name, &module)?;
+            println!("✓ Enabled modules on '{name}':");
+            report_module_change(&name, &change);
+            Ok(())
+        }
+        ModCommands::Remove { name, module } => {
+            let change = ops::remove_apache_module(&name, &module)?;
+            println!("✓ Disabled modules on '{name}':");
+            report_module_change(&name, &change);
             Ok(())
         }
     }

@@ -272,6 +272,7 @@ mod tests {
             default_preset: Framework::Generic,
             default_root: None,
             settings: Default::default(),
+            modules: Vec::new(),
         }
     }
 

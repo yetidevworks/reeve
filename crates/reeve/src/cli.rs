@@ -86,7 +86,8 @@ pub enum Commands {
         width: u16,
         #[arg(long, default_value_t = 26)]
         height: u16,
-        /// Open a modal for the snapshot: "wizard" (new vhost) or "server" (edit).
+        /// Open a modal for the snapshot: "wizard" (new vhost), "server" (edit),
+        /// "modules" (Apache module picker), and so on.
         #[arg(long, default_value = "")]
         modal: String,
     },
@@ -173,8 +174,37 @@ pub enum ServerCommands {
     Restart { name: String },
     /// List servers and their status.
     List,
+    /// Manage an Apache server's loaded modules.
+    #[command(subcommand)]
+    Mod(ModCommands),
     /// Remove a server.
     Remove { name: String },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ModCommands {
+    /// List modules the installed httpd ships and which are loaded.
+    List {
+        /// Server instance name.
+        name: String,
+        /// Show every available module, not just the loaded ones.
+        #[arg(long, short)]
+        all: bool,
+    },
+    /// Enable a module (and anything it needs) for a server.
+    Add {
+        /// Server instance name.
+        name: String,
+        /// Module, e.g. `deflate`, `mod_deflate` or `deflate_module`.
+        module: String,
+    },
+    /// Disable a module for a server.
+    Remove {
+        /// Server instance name.
+        name: String,
+        /// Module, e.g. `deflate`, `mod_deflate` or `deflate_module`.
+        module: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]

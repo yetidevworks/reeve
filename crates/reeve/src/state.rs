@@ -80,6 +80,12 @@ pub struct Server {
     /// `backends::settings_defs`). Empty = all defaults.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub settings: std::collections::BTreeMap<String, String>,
+    /// Extra Apache modules this server loads on top of reeve's always-on base
+    /// set, as canonical module names (`rewrite_module`). Prerequisites are
+    /// resolved at render time, so only explicit choices are stored here.
+    /// Apache-only; ignored by the other backends.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modules: Vec<String>,
 }
 
 impl Server {
@@ -586,6 +592,7 @@ mod tests {
             default_preset: Framework::Generic,
             default_root: None,
             settings: Default::default(),
+            modules: Vec::new(),
         }
     }
 

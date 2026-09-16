@@ -232,6 +232,7 @@ keys for the focused panel).
 | `Enter` | Start server or service / restart FPM master |
 | `x` · `r` | Stop · restart (Servers, Services) |
 | `s` | Per-backend settings (Servers) / per-version PHP settings (PHP) / listening ports (Services) |
+| `m` | Apache module picker (Servers panel, Apache instances only) |
 | `X` | Cycle Xdebug off→debug→profile (PHP panel) |
 | `d` | Set default PHP version (PHP panel) |
 | `p` | Park a directory / manage parks (Vhosts or Parked panel) |
@@ -292,6 +293,7 @@ minutes, and survives closing/reopening the view.
 | `php xdebug <ver> off\|debug\|profile` | Toggle Xdebug for a version (`debug` attaches only to requests carrying `XDEBUG_SESSION`/`XDEBUG_TRIGGER`; `profile` profiles every request) |
 | `server add <backend> [--http N --https N] [--default-site] [--root <dir>] [--preset <fw>]` | Add caddy\|apache\|nginx (optionally a catch-all default site; `--root` overrides its docroot, else the global sites root) |
 | `server start\|stop\|restart\|list\|remove <name>` | Manage a server (independent) |
+| `server mod list\|add\|remove <name> [module] [--all]` | Manage an Apache server's loaded modules (`list` shows what's loaded, `--all` the whole catalog) |
 | `vhost add <host> --root <dir> --php <ver> --server <name> [--ssl] [--preset <fw>] [--proxy <url>]` | Add a vhost |
 | `vhost list\|remove <host>` | Manage vhosts |
 | `vhost show <host>` | Show how a host is served: docroot, preset, PHP, and its `.reeve.toml` |

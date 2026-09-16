@@ -2,7 +2,7 @@
 //! two never drift. These functions mutate state and (re)render native configs;
 //! they do not print — callers format their own feedback.
 
-use crate::backends::{backend_for, server_service_id};
+use crate::backends::{apache_modules, backend_for, server_service_id};
 use crate::brew::Brew;
 use crate::config::{load_config, save_config};
 use crate::daemon::{self, Status};
@@ -381,6 +381,168 @@ pub fn set_php_setting(version: &str, key: &str, value: &str) -> Result<()> {
     php::ensure_fpm_running(&brew, &record)
 }
 
+/// Outcome of changing a server's Apache module selection.
+pub struct ModuleChange {
+    /// Modules newly loaded as a result, including prerequisites pulled in.
+    pub added: Vec<String>,
+    /// Modules no longer loaded as a result.
+    pub removed: Vec<String>,
+    /// Whether the running server was restarted to pick the change up.
+    pub restarted: bool,
+}
+
+/// Fetch a server and confirm it's an Apache instance — the other backends
+/// have no loadable-module concept (nginx modules are compile-time, Caddy needs
+/// an `xcaddy` rebuild), so there's nothing to manage for them.
+fn require_apache(name: &str) -> Result<Server> {
+    let server = require_server(name)?;
+    if server.backend != crate::state::Backend::Apache {
+        bail!(
+            "'{name}' is a {} server — module management is Apache-only.",
+            server.backend
+        );
+    }
+    Ok(server)
+}
+
+/// Replace a server's Apache module selection, re-render, and restart it when
+/// it's running. Rolls the selection back if the new config doesn't pass
+/// `httpd -t`, so a bad pick can never leave a server unable to start.
+pub fn set_apache_modules(name: &str, modules: Vec<String>) -> Result<ModuleChange> {
+    let server = require_apache(name)?;
+    let brew = Brew::detect()?;
+    // Both snapshots ask for the SSL set so the reported diff is about the
+    // user's choice, not about whether this server happens to serve HTTPS —
+    // the SSL modules cancel out between the two.
+    let before: Vec<String> = apache_modules::load_list(&brew, &server, true)
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+
+    let mut chosen: Vec<String> = modules
+        .iter()
+        .map(|m| apache_modules::canonical(m))
+        .collect();
+    chosen.sort();
+    chosen.dedup();
+    // Prerequisites are re-derived at render time; storing only explicit
+    // choices keeps state.toml readable and lets the table evolve.
+    chosen.retain(|m| !apache_modules::is_base(m));
+
+    let previous = server.modules.clone();
+    let mut state = load_state()?;
+    let rec = state
+        .servers
+        .iter_mut()
+        .find(|s| s.name == name)
+        .ok_or_else(|| anyhow!("Server '{name}' not found"))?;
+    rec.modules = chosen;
+    let updated = rec.clone();
+    save_state(&state)?;
+
+    // Validate against the real httpd. On failure put the old selection back
+    // and re-render so the on-disk conf matches state again.
+    if let Err(e) = render_server(&updated) {
+        let mut state = load_state()?;
+        if let Some(rec) = state.servers.iter_mut().find(|s| s.name == name) {
+            rec.modules = previous;
+        }
+        save_state(&state)?;
+        let _ = render_server(&require_server(name)?);
+        return Err(e.context(format!("module change rejected for '{name}'")));
+    }
+
+    let after: Vec<String> = apache_modules::load_list(&brew, &updated, true)
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    let restarted = matches!(serve_state(&updated), ServeState::Serving);
+    if restarted {
+        restart_server(name)?;
+    }
+    Ok(ModuleChange {
+        added: after
+            .iter()
+            .filter(|n| !before.contains(n))
+            .cloned()
+            .collect(),
+        removed: before
+            .iter()
+            .filter(|n| !after.contains(n))
+            .cloned()
+            .collect(),
+        restarted,
+    })
+}
+
+/// Enable an Apache module (plus any prerequisites) on a server.
+pub fn add_apache_module(name: &str, module: &str) -> Result<ModuleChange> {
+    let server = require_apache(name)?;
+    let brew = Brew::detect()?;
+    let module = apache_modules::resolve_choice(&brew, module)?;
+    if server
+        .modules
+        .iter()
+        .any(|m| apache_modules::canonical(m) == module)
+    {
+        bail!("'{module}' is already enabled on '{name}'");
+    }
+    let mut modules = server.modules.clone();
+    modules.push(module);
+    set_apache_modules(name, modules)
+}
+
+/// Disable an Apache module on a server. Refuses when another enabled module
+/// lists it as a prerequisite, naming the ones that would break.
+pub fn remove_apache_module(name: &str, module: &str) -> Result<ModuleChange> {
+    let server = require_apache(name)?;
+    let module = apache_modules::canonical(module);
+    if !server
+        .modules
+        .iter()
+        .any(|m| apache_modules::canonical(m) == module)
+    {
+        if apache_modules::is_base(&module) {
+            bail!("'{module}' is part of reeve's always-on base set and can't be removed.");
+        }
+        if apache_modules::is_ssl(&module) {
+            bail!("'{module}' is loaded automatically whenever '{name}' serves HTTPS.");
+        }
+        // Loaded, but only because something else needs it — saying "not
+        // enabled" about a module plainly present in the conf is just
+        // confusing, so name what's actually holding it in.
+        let needed_by = apache_modules::dependents_of(&module, &server.modules);
+        if !needed_by.is_empty() {
+            bail!(
+                "'{module}' isn't enabled directly — it's loaded as a prerequisite of {}. \
+                 Remove {} instead.",
+                needed_by.join(", "),
+                if needed_by.len() == 1 {
+                    "that"
+                } else {
+                    "those"
+                }
+            );
+        }
+        bail!("'{module}' is not enabled on '{name}'");
+    }
+    let dependents = apache_modules::dependents_of(&module, &server.modules);
+    if !dependents.is_empty() {
+        bail!(
+            "'{module}' is required by {}. Remove {} first.",
+            dependents.join(", "),
+            if dependents.len() == 1 { "it" } else { "those" }
+        );
+    }
+    let modules: Vec<String> = server
+        .modules
+        .iter()
+        .filter(|m| apache_modules::canonical(m) != module)
+        .cloned()
+        .collect();
+    set_apache_modules(name, modules)
+}
+
 /// Set Xdebug mode for a version, install Xdebug via pecl if enabling and it's
 /// missing, persist, and restart the FPM master. Slow when an install is needed.
 pub fn set_xdebug(version: &str, mode: XdebugMode) -> Result<()> {
@@ -745,6 +907,7 @@ mod tests {
             default_preset: Default::default(),
             default_root: None,
             settings: Default::default(),
+            modules: Vec::new(),
         }
     }
 

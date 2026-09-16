@@ -9,6 +9,7 @@ use crate::state::{Backend, Server, State, Vhost};
 use anyhow::Result;
 
 mod apache;
+pub mod apache_modules;
 mod caddy;
 mod nginx;
 mod ols;

@@ -462,6 +462,7 @@ mod tests {
             default_preset: Default::default(),
             default_root: None,
             settings: Default::default(),
+            modules: Vec::new(),
         }
     }
 

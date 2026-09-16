@@ -123,6 +123,9 @@ pub fn render(f: &mut Frame, app: &App) {
     if app.ext_modal.is_some() {
         render_ext_modal(f, app);
     }
+    if app.modules_modal.is_some() {
+        render_modules_modal(f, app);
+    }
     if app.config_modal.is_some() {
         render_config_modal(f, app);
     }
@@ -392,6 +395,106 @@ fn render_log_modal(f: &mut Frame, app: &App) {
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
+fn render_modules_modal(f: &mut Frame, app: &App) {
+    let m = app.modules_modal.as_ref().unwrap();
+    let vis = m.visible();
+    let total = vis.len();
+    // Window the list — httpd ships well over a hundred modules.
+    let win = 14usize;
+    let start = if total <= win {
+        0
+    } else {
+        m.sel.saturating_sub(win / 2).min(total - win)
+    };
+    let end = (start + win).min(total);
+    let area = centered_rect(66, (end - start) as u16 + 8, f.area());
+    f.render_widget(Clear, area);
+
+    let on_count = m.rows.iter().filter(|r| r.enabled || r.implied).count();
+    let mut lines = vec![
+        Line::from(vec![
+            Span::raw("  Filter: "),
+            Span::styled(
+                format!("{}▏", m.filter),
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("   {on_count} loaded of {} available", m.rows.len()),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::raw(""),
+    ];
+    if total == 0 {
+        lines.push(Line::from(Span::styled(
+            "  no module matches that filter",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    for (i, &idx) in vis[start..end].iter().enumerate() {
+        let row = &m.rows[idx];
+        let active = start + i == m.sel;
+        let marker = if active { "› " } else { "  " };
+        // Locked = reeve's own base set; implied = pulled in by a prerequisite.
+        let (box_, note, note_style) = if row.locked {
+            ("[■]", "always on", Style::default().fg(Color::DarkGray))
+        } else if row.enabled {
+            ("[x]", "", Style::default())
+        } else if row.implied {
+            (
+                "[+]",
+                "required by another",
+                Style::default().fg(Color::Cyan),
+            )
+        } else {
+            ("[ ]", "", Style::default())
+        };
+        let name_style = if active {
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        } else if row.locked {
+            Style::default().fg(Color::DarkGray)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(vec![
+            Span::raw(marker),
+            Span::styled(format!("{box_} "), name_style),
+            Span::styled(format!("{:<30}", row.name), name_style),
+            Span::styled(note.to_string(), note_style),
+        ]));
+    }
+    if end < total {
+        lines.push(Line::from(Span::styled(
+            format!("  … {} more", total - end),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    lines.push(Line::raw(""));
+    if let Some(err) = &m.error {
+        lines.push(Line::from(Span::styled(
+            format!("  {err}"),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        if m.busy {
+            "  applying…".to_string()
+        } else {
+            "  type to filter · space toggle · enter save · esc cancel".to_string()
+        },
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .title(Span::styled(
+            format!(" Apache modules: {} ", m.server_name),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
 fn render_settings_modal(f: &mut Frame, app: &App) {
     let m = app.settings_modal.as_ref().unwrap();
     let defs = crate::backends::settings_defs(m.backend);
@@ -644,6 +747,7 @@ fn render_keys(f: &mut Frame, app: &App, area: Rect) {
             ("n", "new"),
             ("e", "edit"),
             ("s", "settings"),
+            ("m", "modules"),
             ("R/del", "remove"),
             ("a", "apply"),
             ("t", "traffic"),
