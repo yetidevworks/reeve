@@ -28,12 +28,8 @@ the thing the old switcher-script approach can't do.
 ## Highlights
 
 - **Per-vhost PHP version** — each vhost picks its PHP; versions run side by side.
-- **Per-version PHP tuning** — `memory_limit`, upload sizes, OPcache, FPM pool,
-  timezone, and a one-click **Xdebug** toggle (off/debug/profile), all without
-  hand-editing `php.ini`. In `debug` mode Xdebug attaches only to requests
-  carrying `XDEBUG_SESSION`/`XDEBUG_TRIGGER` — set by any IDE debug run
-  configuration or browser extension — so background traffic from your other
-  sites can't steal the IDE's connection slot.
+- **Per-version PHP tuning** — `memory_limit`, upload sizes, OPcache, FPM pool, timezone, all without hand-editing `php.ini`.
+- **Xdebug on tap** — `reeve xdebug on` / `off` / `toggle` from inside a project turns it on for that site's PHP version, or press `X` in the dashboard. Client host and port, start policy, IDE key and profiler output dir are set per version with `o` in the dashboard or `reeve php set`. In `debug` mode Xdebug attaches only to requests carrying `XDEBUG_SESSION`/`XDEBUG_TRIGGER` (set by any IDE debug run configuration or browser extension), so background traffic from your other sites can't steal the IDE's connection slot.
 - **Multiple backends** behind one abstraction: **Caddy**, **Apache**, **nginx**
   (OpenLiteSpeed is wired but unsupported on macOS — see below).
 - **Run several servers at once**, on different ports, managed independently.
@@ -142,7 +138,8 @@ reeve service add mysql && reeve service start mysql   # MySQL on :3306
 reeve service add mailpit && reeve service start mailpit  # SMTP :1025, UI :8025
 reeve service set mailpit smtp 1026                    # move SMTP off a port another catcher owns
 reeve php set 8.3 memory_limit 512M                    # tune php.ini
-reeve php xdebug 8.3 debug                              # Xdebug, attaches on XDEBUG_SESSION
+reeve xdebug on                                        # Xdebug for the site you're in, attaches on XDEBUG_SESSION
+reeve php set 8.3 xdebug.client_host host.docker.internal   # point Xdebug at an IDE elsewhere
 reeve vhost add shop.test --root ~/Sites/shop --php 8.3 --server caddy --ssl --preset laravel
 reeve vhost add ui.test --proxy http://localhost:5173 --server caddy --ssl   # reverse proxy
 ```
@@ -234,6 +231,7 @@ keys for the focused panel).
 | `s` | Per-backend settings (Servers) / per-version PHP settings (PHP) / listening ports (Services) |
 | `m` | Apache module picker (Servers panel, Apache instances only) |
 | `X` | Cycle Xdebug off→debug→profile (PHP panel) |
+| `o` | Xdebug options: mode, start policy, client host/port, IDE key, output dir (PHP panel) |
 | `d` | Set default PHP version (PHP panel) |
 | `p` | Park a directory / manage parks (Vhosts or Parked panel) |
 | `L` | View the focused item's log |
@@ -290,7 +288,9 @@ minutes, and survives closing/reopening the view.
 | `php cli [ver]` | Switch the terminal `php` (via the `~/.reeve/bin` shim); omit to show current |
 | `php ext add\|remove\|list <ver> [name]` | Manage extensions per version (pecl) |
 | `php settings <ver>` / `php set <ver> <key> <value>` | Show / tune php.ini, OPcache, FPM pool |
-| `php xdebug <ver> off\|debug\|profile` | Toggle Xdebug for a version (`debug` attaches only to requests carrying `XDEBUG_SESSION`/`XDEBUG_TRIGGER`; `profile` profiles every request) |
+| `xdebug [on\|off\|toggle\|debug\|profile\|status] [ver\|site] [--all]` | Turn Xdebug on/off for the site in the current folder (else the default PHP), a named version or site, or `--all` versions; no action lists every version's Xdebug state. `on` keeps an already-enabled mode; `debug` attaches only to requests carrying `XDEBUG_SESSION`/`XDEBUG_TRIGGER`; `profile` profiles every request |
+| `php xdebug <ver> on\|off\|toggle\|debug\|profile` | Same, for an explicit version |
+| `php set <ver> xdebug.<option> <value>` | Xdebug options: `mode`, `start_with_request` (`auto`\|`trigger`\|`yes`\|`no`), `client_host`, `client_port`, `idekey`, `output_dir`. An empty value resets to the default |
 | `server add <backend> [--http N --https N] [--default-site] [--root <dir>] [--preset <fw>]` | Add caddy\|apache\|nginx (optionally a catch-all default site; `--root` overrides its docroot, else the global sites root) |
 | `server start\|stop\|restart\|list\|remove <name>` | Manage a server (independent) |
 | `server mod list\|add\|remove <name> [module] [--all]` | Manage an Apache server's loaded modules (`list` shows what's loaded, `--all` the whole catalog) |

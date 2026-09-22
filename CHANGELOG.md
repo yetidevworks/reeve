@@ -2,6 +2,12 @@
 
 All notable changes to reeve are documented here.
 
+## 1.1.1
+
+### Added
+- **`reeve xdebug on` / `off` / `toggle`.** Xdebug can now be switched from anywhere without naming a PHP version: run it inside a project and it acts on that site's PHP version, otherwise on the default one. Name a version (`reeve xdebug on 8.4`) or a site (`reeve xdebug off grav.test`) to pick another, or pass `--all`. `on` leaves an already-enabled mode alone, so a running profile stays a profile. `reeve xdebug` on its own lists every version's mode, start policy, client host and port, IDE key and output dir, and marks which one the current folder maps to. When a folder is served by several vhosts on different PHP versions, reeve asks you to name one rather than guessing. Turning Xdebug on for one site reminds you it applies to every site on that version, since Xdebug lives in the FPM master. `reeve php xdebug <ver>` accepts `on` and `toggle` too.
+- **Xdebug options in the dashboard and on the CLI.** Press **`o`** on the PHP panel for a per-version Xdebug form: mode, `start_with_request` (`auto` follows the mode: `trigger` for debug, `yes` for profile), client host, client port, IDE key and profiler output dir. `X` still cycles the mode in one keypress. The same options are available as `reeve php set <ver> xdebug.<option> <value>` and are shown by `reeve php settings`. Everything is validated before anything is saved, a missing output dir is created (Xdebug otherwise fails silently when it can't write a profile), and options are passed as FPM startup defines like the mode already was, so Homebrew's `ext-xdebug.ini` can't override them. The client port was previously only changeable by editing `state.toml`.
+
 ## 1.1.0
 
 ### Added

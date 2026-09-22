@@ -132,6 +132,9 @@ pub fn render(f: &mut Frame, app: &App) {
     if app.php_settings.is_some() {
         render_php_settings_modal(f, app);
     }
+    if app.xdebug_modal.is_some() {
+        render_xdebug_modal(f, app);
+    }
     if app.service_picker.is_some() {
         render_service_picker(f, app);
     }
@@ -599,6 +602,65 @@ fn render_php_settings_modal(f: &mut Frame, app: &App) {
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
+fn render_xdebug_modal(f: &mut Frame, app: &App) {
+    let m = app.xdebug_modal.as_ref().unwrap();
+    let defs = crate::php::xdebug_settings_defs();
+    let extra = if m.error.is_some() { 7 } else { 6 };
+    let area = centered_rect(80, defs.len() as u16 + extra, f.area());
+    f.render_widget(Clear, area);
+
+    let mut lines = vec![Line::raw("")];
+    for (i, def) in defs.iter().enumerate() {
+        let active = m.field == i;
+        let marker = if active { "› " } else { "  " };
+        let val = m.values.get(i).cloned().unwrap_or_default();
+        // Choice fields show as a ‹selector›; text fields get a cursor.
+        let shown = match (def.choices.is_empty(), active) {
+            (false, true) => format!("‹ {val} ›"),
+            (false, false) => format!("  {val}"),
+            (true, true) => format!("{val}▏"),
+            (true, false) => val,
+        };
+        let vstyle = if active {
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(vec![
+            Span::raw(format!("{marker}{:<20}", format!("{}:", def.label))),
+            Span::styled(format!("{shown:<14}"), vstyle),
+            Span::styled(
+                format!(" ({})", def.help),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "  debug sessions start from your IDE, a browser extension or ?XDEBUG_SESSION=1",
+        Style::default().fg(Color::DarkGray),
+    )));
+    if let Some(err) = &m.error {
+        lines.push(Line::from(Span::styled(
+            format!("  {err}"),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        "  tab/↑↓ field · ←→/space choose · type to edit · enter save · esc cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .title(Span::styled(
+            format!(" PHP {} Xdebug ", m.version),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
 fn render_service_ports_modal(f: &mut Frame, app: &App) {
     let m = app.service_ports.as_ref().unwrap();
     let defs = crate::services::port_defs(m.kind);
@@ -795,6 +857,7 @@ fn render_keys(f: &mut Frame, app: &App, area: Rect) {
             ("e", "exts"),
             ("s", "settings"),
             ("X", "xdebug"),
+            ("o", "xdebug opts"),
             ("d", "default"),
             ("C", "cli php"),
             ("R/del", "remove"),

@@ -14,7 +14,8 @@ use crate::state::{
     load_state, save_state, ManagedServiceInstance, PhpVersion as Php, Server, ServiceKind, State,
     Vhost, XdebugMode,
 };
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use std::path::Path;
 
 /// Fetch a server from state by name, or error.
 pub fn require_server(name: &str) -> Result<Server> {
@@ -365,6 +366,9 @@ pub fn stop_fpm(version: &str) -> Result<()> {
 /// Set one php.ini / OPcache / FPM setting for a version, persist, and restart
 /// the FPM master so it takes effect.
 pub fn set_php_setting(version: &str, key: &str, value: &str) -> Result<()> {
+    if key.starts_with("xdebug.") {
+        return configure_xdebug(version, &[(key.to_string(), value.to_string())]).map(|_| ());
+    }
     if !php::php_settings_defs().iter().any(|d| d.key == key) {
         bail!("Unknown PHP setting '{key}'. See `reeve php settings {version}`.");
     }
@@ -546,20 +550,150 @@ pub fn remove_apache_module(name: &str, module: &str) -> Result<ModuleChange> {
 /// Set Xdebug mode for a version, install Xdebug via pecl if enabling and it's
 /// missing, persist, and restart the FPM master. Slow when an install is needed.
 pub fn set_xdebug(version: &str, mode: XdebugMode) -> Result<()> {
+    configure_xdebug(version, &[("xdebug.mode".into(), mode.as_str().into())]).map(|_| ())
+}
+
+/// Apply any mix of Xdebug options (`xdebug.mode` included) to a version in
+/// one go: validate them all before touching anything, build Xdebug via pecl
+/// if the result has it enabled and it isn't loaded, then persist and restart
+/// the FPM master. Returns the resulting mode. Slow when an install is needed.
+pub fn configure_xdebug(version: &str, changes: &[(String, String)]) -> Result<XdebugMode> {
+    let normalized = changes
+        .iter()
+        .map(|(k, v)| Ok((k.as_str(), php::normalize_xdebug_setting(k, v)?)))
+        .collect::<Result<Vec<_>>>()?;
+    let mut state = load_state()?;
+    let mut record = state
+        .get_php(version)
+        .cloned()
+        .ok_or_else(|| anyhow!("PHP {version} is not managed"))?;
+    for (key, value) in &normalized {
+        php::apply_xdebug_setting(&mut record, key, value)?;
+    }
+    // Xdebug fails silently when it can't write its output files, so make sure
+    // the directory exists rather than leaving profiles to vanish.
+    if let Some(dir) = record.settings.get("xdebug.output_dir") {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("Failed to create Xdebug output dir {dir}"))?;
+    }
     let brew = Brew::detect()?;
-    if !mode.is_off() && !php::extensions::is_loaded(&brew, version, "xdebug")? {
+    if !record.xdebug.is_off() && !php::extensions::is_loaded(&brew, version, "xdebug")? {
         php::extensions::add(&brew, version, "xdebug")?;
     }
-    let mut state = load_state()?;
-    let php_rec = state
-        .php_versions
-        .iter_mut()
-        .find(|p| p.version == version)
-        .ok_or_else(|| anyhow!("PHP {version} is not managed"))?;
-    php_rec.xdebug = mode;
-    let record = php_rec.clone();
+    if let Some(slot) = state.php_versions.iter_mut().find(|p| p.version == version) {
+        *slot = record.clone();
+    }
     save_state(&state)?;
-    php::ensure_fpm_running(&brew, &record)
+    php::ensure_fpm_running(&brew, &record)?;
+    Ok(record.xdebug)
+}
+
+/// Whether enabling Xdebug for a version would need a (slow) pecl build first.
+/// An unanswerable check counts as "yes" so callers show the install output.
+pub fn xdebug_needs_install(version: &str) -> bool {
+    Brew::detect()
+        .and_then(|b| php::extensions::is_loaded(&b, version, "xdebug"))
+        .map(|loaded| !loaded)
+        .unwrap_or(true)
+}
+
+/// How many sites (declared and parked, proxies excluded) run on a PHP
+/// version. Xdebug is per FPM master, so this is everything a toggle touches.
+pub fn sites_on_php(state: &State, version: &str) -> usize {
+    state
+        .vhosts
+        .iter()
+        .chain(crate::park::expand_all(state).iter())
+        .filter(|v| !v.is_proxy() && v.php_version == version)
+        .count()
+}
+
+/// Which managed PHP version a CLI Xdebug command acts on, and why.
+pub struct XdebugTarget {
+    pub version: String,
+    /// Human-readable reason, e.g. "grav.test" or "default PHP".
+    pub via: String,
+}
+
+/// Resolve the PHP version for `reeve xdebug`: an explicit version or site
+/// name wins; otherwise the site containing `cwd`; otherwise the default PHP.
+pub fn resolve_xdebug_target(target: Option<&str>, cwd: &Path) -> Result<XdebugTarget> {
+    let state = load_state()?;
+    let sites: Vec<Vhost> = state
+        .vhosts
+        .iter()
+        .cloned()
+        .chain(crate::park::expand_all(&state))
+        .filter(|v| !v.is_proxy())
+        .collect();
+    if let Some(t) = target {
+        if state.get_php(t).is_some() {
+            return Ok(XdebugTarget {
+                version: t.to_string(),
+                via: format!("PHP {t}"),
+            });
+        }
+        return sites
+            .iter()
+            .find(|v| v.server_name.eq_ignore_ascii_case(t))
+            .map(|v| XdebugTarget {
+                version: v.php_version.clone(),
+                via: v.server_name.clone(),
+            })
+            .ok_or_else(|| anyhow!("'{t}' is neither a managed PHP version nor a known site."));
+    }
+    let here = sites_for_dir(&sites, cwd);
+    if let Some(first) = here.first() {
+        // Several vhosts can serve one folder on different PHP versions (a
+        // php83.test / php84.test pair over the same root) — don't guess.
+        if here.iter().any(|v| v.php_version != first.php_version) {
+            let names: Vec<String> = here
+                .iter()
+                .map(|v| format!("{} (PHP {})", v.server_name, v.php_version))
+                .collect();
+            bail!(
+                "This folder is served by several sites on different PHP versions: {}. \
+                 Name the version or site to use.",
+                names.join(", ")
+            );
+        }
+        return Ok(XdebugTarget {
+            version: first.php_version.clone(),
+            via: first.server_name.clone(),
+        });
+    }
+    let version = load_config()?
+        .default_php
+        .filter(|d| state.get_php(d).is_some())
+        .or_else(|| state.php_versions.first().map(|p| p.version.clone()))
+        .ok_or_else(|| anyhow!("No PHP versions are managed yet."))?;
+    Ok(XdebugTarget {
+        version,
+        via: "default PHP".into(),
+    })
+}
+
+/// The sites whose project folder contains `dir`. A vhost's `docroot` is its
+/// project root (the preset's `public/` is joined only at render time), so a
+/// prefix match covers the whole project. When sites nest only the deepest
+/// root counts; several sites sharing that root are all returned.
+fn sites_for_dir<'a>(sites: &'a [Vhost], dir: &Path) -> Vec<&'a Vhost> {
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let dir = canon(dir);
+    let matches: Vec<(usize, &Vhost)> = sites
+        .iter()
+        .filter_map(|v| {
+            let root = canon(Path::new(&v.docroot));
+            dir.starts_with(&root)
+                .then(|| (root.components().count(), v))
+        })
+        .collect();
+    let deepest = matches.iter().map(|(d, _)| *d).max().unwrap_or(0);
+    matches
+        .into_iter()
+        .filter(|(d, _)| *d == deepest)
+        .map(|(_, v)| v)
+        .collect()
 }
 
 /// Add a managed service to state (does not start it). Idempotent.
@@ -964,5 +1098,45 @@ mod tests {
             .label(),
             ":80 held by httpd"
         );
+    }
+
+    fn site(name: &str, docroot: &str) -> Vhost {
+        Vhost {
+            server_name: name.into(),
+            server: "apache".into(),
+            docroot: docroot.into(),
+            php_version: "8.3".into(),
+            ssl: false,
+            preset: Default::default(),
+            proxy_target: None,
+        }
+    }
+
+    #[test]
+    fn sites_for_dir_matches_the_deepest_project_root() {
+        let sites = vec![
+            site("outer.test", "/nonexistent/ws/outer"),
+            site("inner.test", "/nonexistent/ws/outer/nested"),
+            site("other.test", "/nonexistent/ws/other"),
+            site("twin.test", "/nonexistent/ws/other"),
+        ];
+        let hit = |d: &str| -> Vec<&str> {
+            sites_for_dir(&sites, Path::new(d))
+                .iter()
+                .map(|v| v.server_name.as_str())
+                .collect()
+        };
+        assert_eq!(hit("/nonexistent/ws/outer"), ["outer.test"]);
+        assert_eq!(hit("/nonexistent/ws/outer/src/lib"), ["outer.test"]);
+        assert_eq!(hit("/nonexistent/ws/outer/nested/public"), ["inner.test"]);
+        // Two sites over one root are both reported for the caller to judge.
+        assert_eq!(
+            hit("/nonexistent/ws/other/app"),
+            ["other.test", "twin.test"]
+        );
+        // A shared parent holding many sites is not itself a site, and a name
+        // that merely shares a prefix doesn't count as inside.
+        assert!(hit("/nonexistent/ws").is_empty());
+        assert!(hit("/nonexistent/ws/outer-two").is_empty());
     }
 }

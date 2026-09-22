@@ -40,6 +40,18 @@ pub enum Commands {
     #[command(subcommand)]
     Park(ParkCommands),
 
+    /// Turn Xdebug on or off, or show its status. Acts on the site you're in,
+    /// else the default PHP; name a version or site to pick another.
+    Xdebug {
+        /// on | off | toggle | debug | profile | status (default: status).
+        action: Option<String>,
+        /// PHP version (e.g. 8.3) or site (e.g. grav.test).
+        target: Option<String>,
+        /// Apply to every managed PHP version.
+        #[arg(long, conflicts_with = "target")]
+        all: bool,
+    },
+
     /// Render generated configs and reconcile running services to state.
     Apply,
 
@@ -127,9 +139,9 @@ pub enum PhpCommands {
         key: String,
         value: String,
     },
-    /// Toggle Xdebug for a version: off | debug | profile. `debug` attaches
-    /// only to requests carrying XDEBUG_SESSION/XDEBUG_TRIGGER; `profile`
-    /// profiles every request.
+    /// Set Xdebug for a version: on | off | toggle | debug | profile. `debug`
+    /// attaches only to requests carrying XDEBUG_SESSION/XDEBUG_TRIGGER;
+    /// `profile` profiles every request. See also `reeve xdebug`.
     Xdebug { version: String, mode: String },
 }
 

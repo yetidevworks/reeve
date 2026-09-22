@@ -139,11 +139,13 @@ pub struct App {
     pub config_modal: Option<ConfigModal>,
     /// Per-version PHP settings modal (php.ini / OPcache / FPM pool), when open.
     pub php_settings: Option<PhpSettingsModal>,
+    pub xdebug_modal: Option<XdebugModal>,
     /// Apache module picker for the selected server, when open.
     pub modules_modal: Option<ModulesModal>,
-    /// A queued Xdebug enable that needs a (slow) pecl install — run_loop
+    /// A queued Xdebug change (version + option changes, `xdebug.mode`
+    /// included) that needs a (slow) pecl install — run_loop
     /// suspends the TUI to show output, like `pending_ext`.
-    pub pending_xdebug: Option<(String, XdebugMode)>,
+    pub pending_xdebug: Option<(String, Vec<(String, String)>)>,
     /// Service-picker modal (choose a kind to add), when open.
     pub service_picker: Option<ServicePicker>,
     /// Per-service port modal (e.g. mailpit's SMTP/web-UI ports), when open.
@@ -353,6 +355,16 @@ pub struct PhpSettingsModal {
     pub error: Option<String>,
 }
 
+/// Per-version Xdebug options modal state. `values` parallels
+/// `php::xdebug_settings_defs()`; fields with `choices` cycle instead of
+/// taking typed text.
+pub struct XdebugModal {
+    pub version: String,
+    pub values: Vec<String>,
+    pub field: usize,
+    pub error: Option<String>,
+}
+
 /// Backends in selector order.
 pub const BACKENDS: [Backend; 4] = [
     Backend::Caddy,
@@ -481,6 +493,7 @@ impl App {
             pending_ext: None,
             config_modal: None,
             php_settings: None,
+            xdebug_modal: None,
             pending_xdebug: None,
             service_picker: None,
             service_ports: None,
@@ -724,6 +737,7 @@ impl App {
             || self.modules_modal.is_some()
             || self.config_modal.is_some()
             || self.php_settings.is_some()
+            || self.xdebug_modal.is_some()
             || self.service_picker.is_some()
             || self.service_ports.is_some()
             || self.park_modal.is_some()
@@ -805,6 +819,7 @@ pub fn snapshot(width: u16, height: u16, modal: &str) -> Result<String> {
         "ext" => open_ext_modal(&mut app),
         "modules" => open_modules_modal(&mut app),
         "phpsettings" => open_php_settings(&mut app),
+        "xdebug" => open_xdebug_modal(&mut app),
         "service" => app.service_picker = Some(ServicePicker { sel: 0 }),
         "serviceports" => {
             app.focus = Panel::Services;
@@ -941,8 +956,8 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) ->
         }
 
         // Enabling Xdebug may need to build it via pecl — same suspend treatment.
-        if let Some((ver, mode)) = app.pending_xdebug.take() {
-            run_xdebug_suspended(terminal, app, &ver, mode)?;
+        if let Some((ver, changes)) = app.pending_xdebug.take() {
+            run_xdebug_suspended(terminal, app, &ver, &changes)?;
         }
 
         // Starting a service may need a (slow) brew install — same treatment.
@@ -1020,6 +1035,10 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         handle_php_settings_key(app, code);
         return;
     }
+    if app.xdebug_modal.is_some() {
+        handle_xdebug_key(app, code);
+        return;
+    }
     if app.service_picker.is_some() {
         handle_service_picker_key(app, code);
         return;
@@ -1087,6 +1106,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         }
         // 'X' = Xdebug toggle (PHP) — moved off 'x' so 'x' can mean stop.
         KeyCode::Char('X') if app.focus == Panel::Php => toggle_xdebug(app),
+        KeyCode::Char('o') if app.focus == Panel::Php => open_xdebug_modal(app),
         // 'r' = restart, consistently across panels. For a vhost (no process of
         // its own) it re-applies the owning server(s).
         KeyCode::Char('r') => match app.focus {
@@ -2297,18 +2317,100 @@ fn toggle_xdebug(app: &mut App) {
     };
     let next = p.xdebug.next();
     // Enabling for the first time may require building Xdebug — do it suspended.
-    let needs_install = !next.is_off()
-        && Brew::detect()
-            .and_then(|b| php::extensions::is_loaded(&b, &p.version, "xdebug"))
-            .map(|loaded| !loaded)
-            .unwrap_or(true);
-    if needs_install {
-        app.pending_xdebug = Some((p.version.clone(), next));
+    if !next.is_off() && ops::xdebug_needs_install(&p.version) {
+        let change = ("xdebug.mode".to_string(), next.as_str().to_string());
+        app.pending_xdebug = Some((p.version.clone(), vec![change]));
         app.message = format!("installing Xdebug for PHP {}…", p.version);
     } else {
         let r = ops::set_xdebug(&p.version, next)
             .map(|_| format!("PHP {} Xdebug {}", p.version, next.as_str()));
         app.act("xdebug", r);
+    }
+}
+
+/// Open the Xdebug options modal for the selected PHP version.
+fn open_xdebug_modal(app: &mut App) {
+    let Some(p) = app.state.php_versions.get(app.sel_php).cloned() else {
+        return;
+    };
+    let values = php::xdebug_settings_defs()
+        .iter()
+        .map(|d| php::xdebug_setting(&p, d))
+        .collect();
+    app.xdebug_modal = Some(XdebugModal {
+        version: p.version,
+        values,
+        field: 0,
+        error: None,
+    });
+}
+
+fn handle_xdebug_key(app: &mut App, code: KeyCode) {
+    let defs = php::xdebug_settings_defs();
+    let n = defs.len();
+    let m = app.xdebug_modal.as_mut().unwrap();
+    let choices = defs[m.field].choices;
+    // Step a choice field through its options, wrapping at either end.
+    let cycle = |m: &mut XdebugModal, step: isize| {
+        let len = choices.len() as isize;
+        let cur = choices
+            .iter()
+            .position(|c| *c == m.values[m.field])
+            .unwrap_or(0) as isize;
+        m.values[m.field] = choices[(cur + step).rem_euclid(len) as usize].to_string();
+    };
+    match code {
+        KeyCode::Esc => app.xdebug_modal = None,
+        KeyCode::Enter => submit_xdebug(app),
+        KeyCode::Tab | KeyCode::Down => m.field = (m.field + 1) % n,
+        KeyCode::BackTab | KeyCode::Up => m.field = (m.field + n - 1) % n,
+        KeyCode::Right | KeyCode::Char(' ') if !choices.is_empty() => cycle(m, 1),
+        KeyCode::Left if !choices.is_empty() => cycle(m, -1),
+        KeyCode::Backspace if choices.is_empty() => {
+            m.values[m.field].pop();
+        }
+        KeyCode::Char(c) if choices.is_empty() && !c.is_whitespace() => {
+            m.values[m.field].push(c);
+        }
+        _ => {}
+    }
+}
+
+/// Save the Xdebug modal: validate every field in place, then apply — via the
+/// suspended runner when turning Xdebug on needs a pecl build first.
+fn submit_xdebug(app: &mut App) {
+    let m = app.xdebug_modal.as_mut().unwrap();
+    let defs = php::xdebug_settings_defs();
+    let mut changes = Vec::new();
+    for (i, (def, val)) in defs.iter().zip(m.values.iter()).enumerate() {
+        if let Err(e) = php::normalize_xdebug_setting(def.key, val) {
+            m.field = i;
+            m.error = Some(e.to_string());
+            return;
+        }
+        changes.push((def.key.to_string(), val.clone()));
+    }
+    let version = m.version.clone();
+    let enabling = changes
+        .iter()
+        .any(|(k, v)| k == "xdebug.mode" && v != XdebugMode::Off.as_str());
+    if enabling && ops::xdebug_needs_install(&version) {
+        app.xdebug_modal = None;
+        app.pending_xdebug = Some((version.clone(), changes));
+        app.message = format!("installing Xdebug for PHP {version}…");
+        return;
+    }
+    match ops::configure_xdebug(&version, &changes) {
+        Ok(mode) => {
+            app.xdebug_modal = None;
+            app.message = format!("✓ PHP {version} Xdebug {} (FPM restarted)", mode.as_str());
+            app.refresh();
+        }
+        Err(e) => {
+            if let Some(m) = app.xdebug_modal.as_mut() {
+                m.error = Some(e.to_string());
+            }
+        }
     }
 }
 
@@ -3018,16 +3120,14 @@ fn run_xdebug_suspended(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut App,
     version: &str,
-    mode: XdebugMode,
+    changes: &[(String, String)],
 ) -> Result<()> {
     restore_terminal(terminal)?;
-    println!(
-        "\n── Enabling Xdebug ({}) for PHP {version} ──\n",
-        mode.as_str()
-    );
-    let result = ops::set_xdebug(version, mode);
+    println!("\n── Enabling Xdebug for PHP {version} ──\n");
+    let result = ops::configure_xdebug(version, changes);
     match &result {
-        Ok(()) => {
+        Ok(mode) => {
+            let mode = *mode;
             println!("\n✓ Xdebug {} for PHP {version}.", mode.as_str());
             if mode == XdebugMode::Debug {
                 println!(
@@ -3052,7 +3152,7 @@ fn run_xdebug_suspended(
     let _ = disable_raw_mode();
     *terminal = setup_terminal()?;
     app.message = match result {
-        Ok(()) => format!("✓ PHP {version} Xdebug {}", mode.as_str()),
+        Ok(mode) => format!("✓ PHP {version} Xdebug {}", mode.as_str()),
         Err(e) => format!("✗ xdebug: {e}"),
     };
     app.refresh();

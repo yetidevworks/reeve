@@ -53,6 +53,11 @@ async fn main() -> Result<()> {
         Some(Commands::Vhost(c)) => cmd_vhost(c),
         Some(Commands::Service(c)) => cmd_service(c),
         Some(Commands::Park(c)) => cmd_park(c),
+        Some(Commands::Xdebug {
+            action,
+            target,
+            all,
+        }) => cmd_xdebug(action, target, all),
         Some(Commands::Apply) => cmd_apply(),
         Some(Commands::Validate) => cmd_validate(),
         Some(Commands::Ssl(c)) => cmd_ssl(c),
@@ -406,7 +411,21 @@ fn cmd_php(c: PhpCommands) -> Result<()> {
                     def.default
                 );
             }
-            println!("Xdebug: {} (port {})", php.xdebug.as_str(), php.xdebug_port);
+            println!("\nXdebug:");
+            for def in php::xdebug_settings_defs() {
+                let val = php::xdebug_setting(php, def);
+                println!(
+                    "{}{:<27} {:<12} {}",
+                    if val != def.default { "★" } else { " " },
+                    def.key,
+                    if val.is_empty() { "-" } else { &val },
+                    if def.default.is_empty() {
+                        "-"
+                    } else {
+                        def.default
+                    }
+                );
+            }
             Ok(())
         }
         PhpCommands::Set {
@@ -419,19 +438,182 @@ fn cmd_php(c: PhpCommands) -> Result<()> {
             Ok(())
         }
         PhpCommands::Xdebug { version, mode } => {
-            brew::Brew::detect_or_offer_install()?;
-            let mode = state::XdebugMode::from_str(&mode)?;
-            ops::set_xdebug(&version, mode)?;
-            println!("✓ PHP {version}: Xdebug {} (FPM restarted)", mode.as_str());
-            if mode == state::XdebugMode::Debug {
-                println!(
-                    "  Sessions start on demand: use an IDE debug run configuration, a browser\n  \
-                     extension, or add ?XDEBUG_SESSION=1 to the URL."
-                );
-            }
-            Ok(())
+            let target = ops::XdebugTarget {
+                via: format!("PHP {version}"),
+                version,
+            };
+            set_xdebug_for(&[target], &mode)
         }
     }
+}
+
+/// `reeve xdebug [action] [target] [--all]`.
+fn cmd_xdebug(action: Option<String>, target: Option<String>, all: bool) -> Result<()> {
+    // A lone version or site (`reeve xdebug grav.test`) reads as a status query.
+    let (action, target) = match action {
+        Some(a)
+            if target.is_none() && !XDEBUG_ACTIONS.contains(&a.to_ascii_lowercase().as_str()) =>
+        {
+            ("status".to_string(), Some(a))
+        }
+        a => (
+            a.unwrap_or_else(|| "status".into()).to_ascii_lowercase(),
+            target,
+        ),
+    };
+    if !XDEBUG_ACTIONS.contains(&action.as_str()) {
+        anyhow::bail!(
+            "Unknown Xdebug action '{action}'. Use one of: {}.",
+            XDEBUG_ACTIONS.join(", ")
+        );
+    }
+    let mut state = load_state()?;
+    state.sort_php();
+    let targets = if all {
+        state
+            .php_versions
+            .iter()
+            .map(|p| ops::XdebugTarget {
+                version: p.version.clone(),
+                via: format!("PHP {}", p.version),
+            })
+            .collect()
+    } else {
+        let cwd = std::env::current_dir()?;
+        match ops::resolve_xdebug_target(target.as_deref(), &cwd) {
+            Ok(t) => vec![t],
+            // A plain status check still lists every version when the current
+            // folder is ambiguous; changing anything needs a clear target.
+            Err(_) if action == "status" && target.is_none() => Vec::new(),
+            Err(e) => return Err(e),
+        }
+    };
+    if action == "status" {
+        print_xdebug_status(&state, &targets, all);
+        return Ok(());
+    }
+    set_xdebug_for(&targets, &action)
+}
+
+/// Words `reeve xdebug` accepts as its action.
+const XDEBUG_ACTIONS: &[&str] = &["status", "on", "off", "toggle", "debug", "profile"];
+
+/// The mode an Xdebug action leaves a version in. `on` keeps an already
+/// enabled mode (a running profile stays a profile); `toggle` flips off ↔ on.
+fn xdebug_action_mode(action: &str, current: state::XdebugMode) -> Result<state::XdebugMode> {
+    use state::XdebugMode::{Debug, Off};
+    Ok(match action {
+        "on" if !current.is_off() => current,
+        "on" => Debug,
+        "toggle" if current.is_off() => Debug,
+        "toggle" => Off,
+        mode => state::XdebugMode::from_str(mode)?,
+    })
+}
+
+/// Apply an Xdebug action to each target version, reporting what changed.
+fn set_xdebug_for(targets: &[ops::XdebugTarget], action: &str) -> Result<()> {
+    let action = action.to_ascii_lowercase();
+    let state = load_state()?;
+    // `--all toggle` flips the set as a whole: any version on turns them all off.
+    let any_on = targets
+        .iter()
+        .filter_map(|t| state.get_php(&t.version))
+        .any(|p| !p.xdebug.is_off());
+    let mut debug_on = false;
+    let mut enabled = false;
+    for t in targets {
+        let current = state
+            .get_php(&t.version)
+            .map(|p| p.xdebug)
+            .ok_or_else(|| anyhow::anyhow!("PHP {} is not managed", t.version))?;
+        let next = if action == "toggle" && targets.len() > 1 {
+            if any_on {
+                state::XdebugMode::Off
+            } else {
+                state::XdebugMode::Debug
+            }
+        } else {
+            xdebug_action_mode(&action, current)?
+        };
+        let label = if t.via == format!("PHP {}", t.version) {
+            t.via.clone()
+        } else {
+            format!("PHP {} ({})", t.version, t.via)
+        };
+        if next == current {
+            println!("• {label}: Xdebug already {}", next.as_str());
+        } else {
+            if !next.is_off() {
+                brew::Brew::detect_or_offer_install()?;
+            }
+            ops::set_xdebug(&t.version, next)?;
+            println!("✓ {label}: Xdebug {} (FPM restarted)", next.as_str());
+            enabled |= !next.is_off();
+        }
+        debug_on |= next == state::XdebugMode::Debug;
+    }
+    if debug_on {
+        println!(
+            "  Sessions start on demand: use an IDE debug run configuration, a browser\n  \
+             extension, or add ?XDEBUG_SESSION=1 to the URL."
+        );
+    }
+    // Xdebug is per FPM master, so enabling it for one site enables it for
+    // every site on that version — worth saying when it isn't obvious.
+    if let ([t], true) = (targets, enabled) {
+        let sharing = ops::sites_on_php(&state, &t.version);
+        if sharing > 1 {
+            println!("  Applies to all {sharing} sites on PHP {}.", t.version);
+        }
+    }
+    Ok(())
+}
+
+/// Print every version's Xdebug state, marking the one(s) a command targeted.
+fn print_xdebug_status(state: &state::State, targets: &[ops::XdebugTarget], all: bool) {
+    if state.php_versions.is_empty() {
+        println!("No PHP versions installed. Run `reeve php install <version>`.");
+        return;
+    }
+    println!(
+        "  {:<8} {:<8} {:<8} {:<22} {:<10} OUTPUT",
+        "VERSION", "MODE", "START", "CLIENT", "IDEKEY"
+    );
+    for p in &state.php_versions {
+        let get = |key: &str| {
+            php::xdebug_settings_defs()
+                .iter()
+                .find(|d| d.key == key)
+                .map(|d| php::xdebug_setting(p, d))
+                .unwrap_or_default()
+        };
+        let mut start = get("xdebug.start_with_request");
+        if start == php::XDEBUG_START_AUTO {
+            start = p.xdebug.start_with_request().to_string();
+        }
+        let idekey = get("xdebug.idekey");
+        let target = targets.iter().find(|t| t.version == p.version);
+        println!(
+            "{} {:<8} {:<8} {:<8} {:<22} {:<10} {}{}",
+            if target.is_some() && !all { "›" } else { " " },
+            p.version,
+            p.xdebug.as_str(),
+            if p.xdebug.is_off() { "-" } else { &start },
+            format!("{}:{}", get("xdebug.client_host"), p.xdebug_port),
+            if idekey.is_empty() { "-" } else { &idekey },
+            get("xdebug.output_dir"),
+            match target {
+                Some(t) if !all && t.via != format!("PHP {}", t.version) =>
+                    format!("   ← {}", t.via),
+                _ => String::new(),
+            }
+        );
+    }
+    println!(
+        "\nToggle with `reeve xdebug on|off [version|site]`; set options with\n\
+         `reeve php set <version> xdebug.<option> <value>` (see `reeve php settings`)."
+    );
 }
 
 fn cmd_php_cli(version: Option<String>) -> Result<()> {

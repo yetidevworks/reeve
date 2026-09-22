@@ -7,7 +7,7 @@ pub mod extensions;
 use crate::brew::Brew;
 use crate::daemon::{self, ServiceSpec};
 use crate::paths;
-use crate::state::PhpVersion;
+use crate::state::{PhpVersion, XdebugMode};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -329,6 +329,144 @@ pub fn php_settings_defs() -> &'static [PhpSettingDef] {
     ]
 }
 
+/// An Xdebug option reeve manages per version. A non-empty `choices` is a
+/// fixed set (the TUI cycles through it rather than taking free text).
+pub struct XdebugSettingDef {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub default: &'static str,
+    pub help: &'static str,
+    pub choices: &'static [&'static str],
+}
+
+/// `xdebug.start_with_request` value meaning "follow the mode": `trigger` for
+/// debug, `yes` for profile (see [`XdebugMode::start_with_request`]).
+pub const XDEBUG_START_AUTO: &str = "auto";
+
+/// Every Xdebug option, in display order. `xdebug.mode` and
+/// `xdebug.client_port` live in [`PhpVersion::xdebug`] / `xdebug_port`; the
+/// rest are stored under their own keys in [`PhpVersion::settings`].
+pub fn xdebug_settings_defs() -> &'static [XdebugSettingDef] {
+    &[
+        XdebugSettingDef {
+            key: "xdebug.mode",
+            label: "Mode",
+            default: "off",
+            help: "debug waits for a trigger",
+            choices: &["off", "debug", "profile"],
+        },
+        XdebugSettingDef {
+            key: "xdebug.start_with_request",
+            label: "Start with request",
+            default: XDEBUG_START_AUTO,
+            help: "auto = follow the mode",
+            choices: &[XDEBUG_START_AUTO, "trigger", "yes", "no"],
+        },
+        XdebugSettingDef {
+            key: "xdebug.client_host",
+            label: "Client host",
+            default: "localhost",
+            help: "where the IDE listens",
+            choices: &[],
+        },
+        XdebugSettingDef {
+            key: "xdebug.client_port",
+            label: "Client port",
+            default: "9003",
+            help: "IDE listen port",
+            choices: &[],
+        },
+        XdebugSettingDef {
+            key: "xdebug.idekey",
+            label: "IDE key",
+            default: "",
+            help: "blank = any",
+            choices: &[],
+        },
+        XdebugSettingDef {
+            key: "xdebug.output_dir",
+            label: "Output dir",
+            default: "/tmp",
+            help: "profiler files",
+            choices: &[],
+        },
+    ]
+}
+
+/// The effective value of an Xdebug option for a version.
+pub fn xdebug_setting(php: &PhpVersion, def: &XdebugSettingDef) -> String {
+    match def.key {
+        "xdebug.mode" => php.xdebug.as_str().to_string(),
+        "xdebug.client_port" => php.xdebug_port.to_string(),
+        key => php.setting(key, def.default).to_string(),
+    }
+}
+
+/// Validate an Xdebug option and return it in canonical form. An empty value
+/// resets the option to its default.
+pub fn normalize_xdebug_setting(key: &str, value: &str) -> Result<String> {
+    let Some(def) = xdebug_settings_defs().iter().find(|d| d.key == key) else {
+        let keys: Vec<&str> = xdebug_settings_defs().iter().map(|d| d.key).collect();
+        bail!(
+            "Unknown Xdebug setting '{key}'. Use one of: {}.",
+            keys.join(", ")
+        );
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(def.default.to_string());
+    }
+    if value.chars().any(char::is_whitespace) {
+        bail!("{} can't contain spaces.", def.label);
+    }
+    match key {
+        "xdebug.mode" => Ok(value.parse::<XdebugMode>()?.as_str().to_string()),
+        "xdebug.client_port" => match value.parse::<u16>() {
+            Ok(p) if p > 0 => Ok(p.to_string()),
+            _ => bail!("Client port must be a number from 1 to 65535."),
+        },
+        "xdebug.output_dir" => {
+            let dir = crate::state::expand_tilde(value);
+            if !Path::new(&dir).is_absolute() {
+                bail!("Output dir must be an absolute path.");
+            }
+            let trimmed = dir.trim_end_matches('/');
+            Ok(if trimmed.is_empty() { "/" } else { trimmed }.to_string())
+        }
+        _ if !def.choices.is_empty() => {
+            let v = value.to_ascii_lowercase();
+            if def.choices.contains(&v.as_str()) {
+                Ok(v)
+            } else {
+                bail!("{} must be one of: {}.", def.label, def.choices.join(", "))
+            }
+        }
+        _ => Ok(value.to_string()),
+    }
+}
+
+/// Store an already-normalized Xdebug option on a version record. Defaults
+/// are removed rather than stored, keeping `state.toml` minimal.
+pub fn apply_xdebug_setting(php: &mut PhpVersion, key: &str, value: &str) -> Result<()> {
+    match key {
+        "xdebug.mode" => php.xdebug = value.parse()?,
+        "xdebug.client_port" => php.xdebug_port = value.parse()?,
+        key => {
+            let default = xdebug_settings_defs()
+                .iter()
+                .find(|d| d.key == key)
+                .map(|d| d.default)
+                .unwrap_or_default();
+            if value == default {
+                php.settings.remove(key);
+            } else {
+                php.settings.insert(key.to_string(), value.to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Render the self-contained FPM config (global + one pool) for a version into
 /// `generated/fpm/phpXY.conf`, returning its path. reeve owns this file;
 /// it never touches Homebrew's default php-fpm.conf. All php.ini / OPcache /
@@ -438,11 +576,20 @@ fn fpm_define_args(php: &PhpVersion) -> Vec<String> {
     if !php.xdebug.is_off() {
         d.push("-d".into());
         d.push(format!("xdebug.client_port={}", php.xdebug_port));
+        let start = match php.setting("xdebug.start_with_request", XDEBUG_START_AUTO) {
+            XDEBUG_START_AUTO => php.xdebug.start_with_request(),
+            explicit => explicit,
+        };
         d.push("-d".into());
-        d.push(format!(
-            "xdebug.start_with_request={}",
-            php.xdebug.start_with_request()
-        ));
+        d.push(format!("xdebug.start_with_request={start}"));
+        // The remaining options are passed only when overridden, so an
+        // untouched version keeps Xdebug's own defaults.
+        for key in ["xdebug.client_host", "xdebug.idekey", "xdebug.output_dir"] {
+            if let Some(val) = php.settings.get(key) {
+                d.push("-d".into());
+                d.push(format!("{key}={val}"));
+            }
+        }
     }
     // opcache.enable as a startup define (avoids the per-request warning).
     d.push("-d".into());
@@ -934,5 +1081,78 @@ mod tests {
                 "opcache.enable=1",
             ]
         );
+    }
+
+    #[test]
+    fn xdebug_settings_normalize_and_reject() {
+        let n = normalize_xdebug_setting;
+        assert_eq!(n("xdebug.mode", "on").unwrap(), "debug");
+        assert_eq!(n("xdebug.mode", "PROFILE").unwrap(), "profile");
+        assert!(n("xdebug.mode", "trace").is_err());
+        assert_eq!(
+            n("xdebug.start_with_request", "Trigger").unwrap(),
+            "trigger"
+        );
+        assert!(n("xdebug.start_with_request", "sometimes").is_err());
+        assert_eq!(n("xdebug.client_port", " 9009 ").unwrap(), "9009");
+        assert!(n("xdebug.client_port", "0").is_err());
+        assert!(n("xdebug.client_port", "70000").is_err());
+        assert!(n("xdebug.client_host", "my host").is_err());
+        // Empty resets to the default.
+        assert_eq!(n("xdebug.client_host", "").unwrap(), "localhost");
+        assert_eq!(n("xdebug.idekey", "").unwrap(), "");
+        assert_eq!(
+            n("xdebug.output_dir", "/var/tmp/xd/").unwrap(),
+            "/var/tmp/xd"
+        );
+        assert!(n("xdebug.output_dir", "relative/dir").is_err());
+        assert!(n("xdebug.remote_enable", "1").is_err());
+    }
+
+    #[test]
+    fn xdebug_options_become_startup_defines_only_when_enabled() {
+        let mut php = PhpVersion {
+            version: "8.3".into(),
+            ..Default::default()
+        };
+        for (k, v) in [
+            ("xdebug.client_host", "host.docker.internal"),
+            ("xdebug.idekey", "PHPSTORM"),
+            ("xdebug.start_with_request", "yes"),
+            ("xdebug.client_port", "9010"),
+        ] {
+            apply_xdebug_setting(&mut php, k, v).unwrap();
+        }
+        // Off: options are stored but Xdebug gets nothing beyond mode=off.
+        assert_eq!(
+            fpm_define_args(&php),
+            vec!["-d", "xdebug.mode=off", "-d", "opcache.enable=1"]
+        );
+
+        apply_xdebug_setting(&mut php, "xdebug.mode", "debug").unwrap();
+        assert_eq!(
+            fpm_define_args(&php),
+            vec![
+                "-d",
+                "xdebug.mode=debug",
+                "-d",
+                "xdebug.client_port=9010",
+                "-d",
+                "xdebug.start_with_request=yes",
+                "-d",
+                "xdebug.client_host=host.docker.internal",
+                "-d",
+                "xdebug.idekey=PHPSTORM",
+                "-d",
+                "opcache.enable=1",
+            ]
+        );
+
+        // Setting an option back to its default drops it from state entirely.
+        apply_xdebug_setting(&mut php, "xdebug.client_host", "localhost").unwrap();
+        apply_xdebug_setting(&mut php, "xdebug.start_with_request", XDEBUG_START_AUTO).unwrap();
+        assert!(!php.settings.contains_key("xdebug.client_host"));
+        assert!(!php.settings.contains_key("xdebug.start_with_request"));
+        assert!(fpm_define_args(&php).contains(&"xdebug.start_with_request=trigger".to_string()));
     }
 }
