@@ -123,6 +123,8 @@ pub enum PhpCommands {
     Pin { version: String },
     /// List installed PHP versions and FPM status.
     List,
+    /// Restart a version's FPM master, re-applying its settings.
+    Restart { version: String },
     /// Set the default PHP version for new vhosts.
     Use { version: String },
     /// Switch the CLI `php` (via the ~/.reeve/bin shim). Omit the version to

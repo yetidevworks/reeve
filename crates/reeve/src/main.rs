@@ -391,6 +391,14 @@ fn cmd_php(c: PhpCommands) -> Result<()> {
             }
             Ok(())
         }
+        PhpCommands::Restart { version } => {
+            if load_state()?.get_php(&version).is_none() {
+                anyhow::bail!("PHP {version} is not managed. See `reeve php list`.");
+            }
+            ops::restart_fpm(&version)?;
+            println!("✓ PHP {version}: FPM master restarted");
+            Ok(())
+        }
         PhpCommands::Cli { version } => cmd_php_cli(version),
         PhpCommands::Ext(ext) => cmd_php_ext(ext),
         PhpCommands::Settings { version } => {
@@ -1206,18 +1214,39 @@ fn cmd_apply() -> Result<()> {
         println!("Nothing to apply — no servers defined.");
         return Ok(());
     }
+    // One server failing (a config that won't validate, a restart launchd
+    // refuses) is reported and the rest carry on — otherwise every server and
+    // PHP master after it in the list is silently left unreconciled.
+    let mut failed: Vec<&str> = Vec::new();
     for server in &state.servers {
         let backend = backend_for(server.backend);
-        backend.ensure_installed(&brew)?;
         let vhosts_owned = park::effective_vhosts_for(&state, &server.name);
         let vhosts: Vec<&Vhost> = vhosts_owned.iter().collect();
-        ops::ensure_vhost_certs(&vhosts, &brew)?;
-        // The default site's HTTPS catch-all needs a `localhost` cert.
-        if server.default_site && !ssl::exists(backends::DEFAULT_SITE_HOST) {
-            ssl::mint(&brew, backends::DEFAULT_SITE_HOST)?;
+        let applied = (|| -> Result<()> {
+            backend.ensure_installed(&brew)?;
+            ops::ensure_vhost_certs(&vhosts, &brew)?;
+            // The default site's HTTPS catch-all needs a `localhost` cert.
+            if server.default_site && !ssl::exists(backends::DEFAULT_SITE_HOST) {
+                ssl::mint(&brew, backends::DEFAULT_SITE_HOST)?;
+            }
+            backend.render(server, &vhosts, &state, &cfg, &brew)?;
+            backend.validate(server, &brew)?;
+            if server.enabled {
+                let spec = backend.service_spec(server, &brew)?;
+                daemon::install(&spec)?;
+                daemon::restart(&server_service_id(server))?;
+            }
+            Ok(())
+        })();
+        if let Err(e) = applied {
+            failed.push(&server.name);
+            let now = daemon::status(&server_service_id(server)).as_str();
+            println!(
+                "✗ {} ({}) not applied — {e:#}\n  ↪ it is {now}; `reeve server start {}` once the cause is fixed",
+                server.name, server.backend, server.name
+            );
+            continue;
         }
-        backend.render(server, &vhosts, &state, &cfg, &brew)?;
-        backend.validate(server, &brew)?;
         // A `.reeve.toml` in the served docroot (or in a parked directory) is
         // never read, and the site keeps working without it — so say so here
         // rather than let the env silently go missing.
@@ -1225,11 +1254,6 @@ fn cmd_apply() -> Result<()> {
             if let Some(w) = project::misplacement_warning(v) {
                 println!("⚠ {w}");
             }
-        }
-        if server.enabled {
-            let spec = backend.service_spec(server, &brew)?;
-            daemon::install(&spec)?;
-            daemon::restart(&server_service_id(server))?;
         }
         let status = if server.enabled {
             daemon::status(&server_service_id(server)).as_str()
@@ -1275,6 +1299,9 @@ fn cmd_apply() -> Result<()> {
             Ok(()) => println!("✓ php {} FPM master reconciled", php.version),
             Err(e) => println!("✗ php {} not reconciled — {e}", php.version),
         }
+    }
+    if !failed.is_empty() {
+        anyhow::bail!("not applied: {}", failed.join(", "));
     }
     Ok(())
 }

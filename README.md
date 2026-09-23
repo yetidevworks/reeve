@@ -29,7 +29,7 @@ the thing the old switcher-script approach can't do.
 
 - **Per-vhost PHP version** — each vhost picks its PHP; versions run side by side.
 - **Per-version PHP tuning** — `memory_limit`, upload sizes, OPcache, FPM pool, timezone, all without hand-editing `php.ini`.
-- **Xdebug on tap** — `reeve xdebug on` / `off` / `toggle` from inside a project turns it on for that site's PHP version, or press `X` in the dashboard. Client host and port, start policy, IDE key and profiler output dir are set per version with `o` in the dashboard or `reeve php set`. In `debug` mode Xdebug attaches only to requests carrying `XDEBUG_SESSION`/`XDEBUG_TRIGGER` (set by any IDE debug run configuration or browser extension), so background traffic from your other sites can't steal the IDE's connection slot.
+- **Xdebug on tap** — `reeve xdebug on` / `off` / `toggle` from inside a project turns it on for that site's PHP version, or press `X` in the dashboard. Client host and port, start policy, IDE key and profiler output dir are set per version with `o` in the dashboard or `reeve php set`. In `debug` mode Xdebug attaches only to requests carrying `XDEBUG_SESSION`/`XDEBUG_TRIGGER` (set by any IDE debug run configuration or browser extension), so background traffic from your other sites can't steal the IDE's connection slot. Command-line PHP keeps Xdebug off (reeve adds a `conf.d/zz-reeve-xdebug.ini` override), so scripts and test suites run at full speed; use `XDEBUG_MODE=debug php script.php` to debug a single run.
 - **Multiple backends** behind one abstraction: **Caddy**, **Apache**, **nginx**
   (OpenLiteSpeed is wired but unsupported on macOS — see below).
 - **Run several servers at once**, on different ports, managed independently.
@@ -285,6 +285,7 @@ minutes, and survives closing/reopening the view.
 | `init` | Detect Homebrew, scaffold config/state |
 | `php install <ver>` | Install (or adopt) a PHP version + FPM master |
 | `php list` / `php use <ver>` | List versions / set the default for new vhosts |
+| `php restart <ver>` | Restart a version's FPM master, re-applying its settings |
 | `php cli [ver]` | Switch the terminal `php` (via the `~/.reeve/bin` shim); omit to show current |
 | `php ext add\|remove\|list <ver> [name]` | Manage extensions per version (pecl) |
 | `php settings <ver>` / `php set <ver> <key> <value>` | Show / tune php.ini, OPcache, FPM pool |

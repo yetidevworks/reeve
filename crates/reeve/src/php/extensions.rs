@@ -116,6 +116,46 @@ pub fn remove(brew: &Brew, version: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// reeve's own conf.d file keeping Xdebug off for command-line PHP. The `zz-`
+/// prefix sorts it after Homebrew's `ext-xdebug.ini`, so its value wins.
+const CLI_XDEBUG_INI: &str = "zz-reeve-xdebug.ini";
+
+const CLI_XDEBUG_BODY: &str = "\
+; Written by reeve and rewritten on every FPM (re)start; edits are overwritten.
+; Keeps Xdebug off for command-line PHP. Homebrew's ext-xdebug.ini sets
+; xdebug.mode=debug, which would otherwise slow every CLI script down (about
+; 7x on function calls). Web requests are unaffected: reeve sets their mode on
+; the FPM master, see `reeve xdebug`. To debug a single CLI run:
+;   XDEBUG_MODE=debug XDEBUG_SESSION=1 php script.php
+[xdebug]
+xdebug.mode = \"off\"
+";
+
+/// Keep Xdebug off for a version's command-line PHP while Xdebug is installed
+/// for it, and drop reeve's override once it isn't. FPM is unaffected either
+/// way: its `-d xdebug.mode` startup define outranks every ini file.
+pub fn sync_cli_xdebug_ini(brew: &Brew, version: &str) -> Result<()> {
+    let path = brew
+        .etc("php")
+        .join(version)
+        .join("conf.d")
+        .join(CLI_XDEBUG_INI);
+    let declared = ini_files(brew, version).iter().any(|f| {
+        fs::read_to_string(f).is_ok_and(|c| c.lines().any(|l| is_extension_line(l, "xdebug")))
+    });
+    if !declared {
+        if path.exists() {
+            fs::remove_file(&path)
+                .with_context(|| format!("Failed to remove {}", path.display()))?;
+        }
+        return Ok(());
+    }
+    if fs::read_to_string(&path).is_ok_and(|c| c == CLI_XDEBUG_BODY) {
+        return Ok(());
+    }
+    fs::write(&path, CLI_XDEBUG_BODY).with_context(|| format!("Failed to write {}", path.display()))
+}
+
 /// All ini files that could declare an extension for a version: php.ini + conf.d.
 fn ini_files(brew: &Brew, version: &str) -> Vec<PathBuf> {
     let base = brew.etc("php").join(version);
@@ -157,4 +197,43 @@ fn strip_extension_lines(brew: &Brew, version: &str, name: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_xdebug_override_follows_whether_xdebug_is_installed() {
+        let root = std::env::temp_dir().join(format!("reeve-xdebug-ini-{}", std::process::id()));
+        let conf_d = root.join("etc/php/8.3/conf.d");
+        fs::create_dir_all(&conf_d).unwrap();
+        let brew = Brew {
+            prefix: root.clone(),
+        };
+        let ours = conf_d.join(CLI_XDEBUG_INI);
+
+        // No Xdebug declared: nothing written.
+        sync_cli_xdebug_ini(&brew, "8.3").unwrap();
+        assert!(!ours.exists());
+
+        // Homebrew's ini loads Xdebug in debug mode: reeve's override appears.
+        let ext = conf_d.join("ext-xdebug.ini");
+        fs::write(
+            &ext,
+            "[xdebug]\nzend_extension=\"xdebug.so\"\nxdebug.mode=debug\n",
+        )
+        .unwrap();
+        sync_cli_xdebug_ini(&brew, "8.3").unwrap();
+        assert_eq!(fs::read_to_string(&ours).unwrap(), CLI_XDEBUG_BODY);
+        // It must sort after the file it overrides.
+        assert!(CLI_XDEBUG_INI > "ext-xdebug.ini");
+
+        // A commented-out load doesn't count, and the override goes away.
+        fs::write(&ext, ";zend_extension=\"xdebug.so\"\n").unwrap();
+        sync_cli_xdebug_ini(&brew, "8.3").unwrap();
+        assert!(!ours.exists());
+
+        fs::remove_dir_all(&root).ok();
+    }
 }

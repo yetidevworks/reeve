@@ -2976,16 +2976,24 @@ fn apply_all() -> Result<String> {
     let state = load_state()?;
     let mut n = 0;
     let mut idle: Vec<&str> = Vec::new();
+    // Keep going past a server that fails so the rest still get applied.
+    let mut failed: Vec<String> = Vec::new();
     for server in &state.servers {
-        if server.enabled {
-            ops::restart_server(&server.name)?;
-            n += 1;
+        let r = if server.enabled {
+            ops::restart_server(&server.name).map(|_| n += 1)
         } else {
-            ops::render_server(server)?;
-            if !crate::park::effective_vhosts_for(&state, &server.name).is_empty() {
-                idle.push(&server.name);
-            }
+            ops::render_server(server).map(|_| {
+                if !crate::park::effective_vhosts_for(&state, &server.name).is_empty() {
+                    idle.push(&server.name);
+                }
+            })
+        };
+        if let Err(e) = r {
+            failed.push(format!("{}: {e}", server.name));
         }
+    }
+    if !failed.is_empty() {
+        anyhow::bail!("applied {n} server(s); not applied — {}", failed.join("; "));
     }
     Ok(if idle.is_empty() {
         format!("applied {n} server(s)")

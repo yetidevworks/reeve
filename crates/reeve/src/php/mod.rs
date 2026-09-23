@@ -201,6 +201,11 @@ pub enum PhpSettingKind {
     Value,
     /// `php_admin_flag[key] = on|off`.
     Flag,
+    /// A `PHP_INI_SYSTEM` directive read once when the FPM master starts
+    /// (OPcache's shared memory is sized before any pool config is parsed), so
+    /// a pool value is accepted, reported back by `ini_get`, and ignored. Passed
+    /// as a `-d` startup define instead.
+    Startup,
 }
 
 /// A tunable PHP setting reeve exposes per version. Mirrors
@@ -274,14 +279,14 @@ pub fn php_settings_defs() -> &'static [PhpSettingDef] {
             label: "OPcache",
             default: "1",
             help: "1 = on, 0 = off",
-            kind: Value,
+            kind: Startup,
         },
         PhpSettingDef {
             key: "opcache.memory_consumption",
             label: "OPcache MB",
             default: "128",
             help: "shared memory (MB)",
-            kind: Value,
+            kind: Startup,
         },
         PhpSettingDef {
             key: "opcache.revalidate_freq",
@@ -521,15 +526,12 @@ fn build_fpm_conf(php: &PhpVersion) -> Result<String> {
 
     // Tunable directives, grouped by where they land.
     for def in php_settings_defs() {
-        // `opcache.enable` is a startup-only directive: emitting it as a
-        // per-request `php_admin_value` makes PHP warn "Zend OPcache can't be
-        // temporary enabled" on every request. It's passed as a `-d` startup
-        // define instead (see `fpm_define_args`).
-        if def.key == "opcache.enable" {
-            continue;
-        }
         let val = php.setting(def.key, def.default);
         match def.kind {
+            // Startup directives go on the master's command line (see
+            // `fpm_define_args`). As a pool value `opcache.enable` also makes
+            // PHP warn "Zend OPcache can't be temporary enabled" per request.
+            PhpSettingKind::Startup => {}
             PhpSettingKind::Pool => conf.push_str(&format!("{} = {}\n", def.key, val)),
             PhpSettingKind::Value => {
                 conf.push_str(&format!("php_admin_value[{}] = {}\n", def.key, val))
@@ -571,8 +573,10 @@ fn fpm_define_args(php: &PhpVersion) -> Vec<String> {
     // per-call overhead; when enabled, set the client port and the per-mode
     // start policy (debug waits for a trigger so vhosts stop racing for the
     // IDE's connection slot; profile runs on every request).
+    // Quoted: PHP's ini parser turns a bare `off` into an empty string, which
+    // Xdebug treats as off but phpinfo shows as "no value" — easy to misread.
     d.push("-d".into());
-    d.push(format!("xdebug.mode={}", php.xdebug.as_str()));
+    d.push(format!("xdebug.mode=\"{}\"", php.xdebug.as_str()));
     if !php.xdebug.is_off() {
         d.push("-d".into());
         d.push(format!("xdebug.client_port={}", php.xdebug_port));
@@ -591,12 +595,18 @@ fn fpm_define_args(php: &PhpVersion) -> Vec<String> {
             }
         }
     }
-    // opcache.enable as a startup define (avoids the per-request warning).
-    d.push("-d".into());
-    d.push(format!(
-        "opcache.enable={}",
-        php.setting("opcache.enable", "1")
-    ));
+    // Startup-only php.ini directives. `opcache.enable` is always forced so
+    // OPcache is on regardless of what conf.d says; the rest are passed only
+    // once set through reeve, leaving an untouched version to its ini files.
+    for def in php_settings_defs() {
+        if def.kind != PhpSettingKind::Startup {
+            continue;
+        }
+        if def.key == "opcache.enable" || php.settings.contains_key(def.key) {
+            d.push("-d".into());
+            d.push(format!("{}={}", def.key, php.setting(def.key, def.default)));
+        }
+    }
     d
 }
 
@@ -632,6 +642,11 @@ pub fn ensure_fpm_running(brew: &Brew, php: &PhpVersion) -> Result<()> {
         ini_dir(brew, version).display().to_string(),
     ];
     args.extend(fpm_define_args(php));
+    // Best-effort: a CLI override that can't be written must not keep the web
+    // side from starting.
+    if let Err(e) = extensions::sync_cli_xdebug_ini(brew, version) {
+        tracing::warn!("PHP {version}: couldn't update the CLI Xdebug override: {e:#}");
+    }
     let spec = ServiceSpec {
         service: service_id(version),
         program: bin,
@@ -1036,7 +1051,7 @@ mod tests {
         assert!(!conf.contains("php_admin_value[opcache.enable]"));
         assert_eq!(
             fpm_define_args(&php),
-            vec!["-d", "xdebug.mode=off", "-d", "opcache.enable=1"]
+            vec!["-d", "xdebug.mode=\"off\"", "-d", "opcache.enable=1"]
         );
 
         // Pool overrides still flow through the conf.
@@ -1045,6 +1060,27 @@ mod tests {
         let conf = build_fpm_conf(&php).unwrap();
         assert!(conf.contains("pm.max_children = 32"));
         assert!(conf.contains("php_admin_value[memory_limit] = 1G"));
+
+        // OPcache's shared memory is sized in the master before pools load,
+        // so it must be a startup define — never a pool value it would ignore.
+        assert!(!conf.contains("opcache.memory_consumption"));
+        php.settings
+            .insert("opcache.memory_consumption".into(), "512".into());
+        assert!(!build_fpm_conf(&php)
+            .unwrap()
+            .contains("opcache.memory_consumption"));
+        assert_eq!(
+            fpm_define_args(&php),
+            vec![
+                "-d",
+                "xdebug.mode=\"off\"",
+                "-d",
+                "opcache.enable=1",
+                "-d",
+                "opcache.memory_consumption=512",
+            ]
+        );
+        php.settings.remove("opcache.memory_consumption");
 
         // Enabling Xdebug adds the port + start policy to the startup defines.
         // Debug waits for an XDEBUG_SESSION/XDEBUG_TRIGGER request so other
@@ -1055,7 +1091,7 @@ mod tests {
             fpm_define_args(&php),
             vec![
                 "-d",
-                "xdebug.mode=debug",
+                "xdebug.mode=\"debug\"",
                 "-d",
                 "xdebug.client_port=9009",
                 "-d",
@@ -1072,7 +1108,7 @@ mod tests {
             fpm_define_args(&php),
             vec![
                 "-d",
-                "xdebug.mode=profile",
+                "xdebug.mode=\"profile\"",
                 "-d",
                 "xdebug.client_port=9009",
                 "-d",
@@ -1126,7 +1162,7 @@ mod tests {
         // Off: options are stored but Xdebug gets nothing beyond mode=off.
         assert_eq!(
             fpm_define_args(&php),
-            vec!["-d", "xdebug.mode=off", "-d", "opcache.enable=1"]
+            vec!["-d", "xdebug.mode=\"off\"", "-d", "opcache.enable=1"]
         );
 
         apply_xdebug_setting(&mut php, "xdebug.mode", "debug").unwrap();
@@ -1134,7 +1170,7 @@ mod tests {
             fpm_define_args(&php),
             vec![
                 "-d",
-                "xdebug.mode=debug",
+                "xdebug.mode=\"debug\"",
                 "-d",
                 "xdebug.client_port=9010",
                 "-d",

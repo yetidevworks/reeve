@@ -2,6 +2,18 @@
 
 All notable changes to reeve are documented here.
 
+## 1.1.2
+
+### Added
+- **`reeve php restart <version>`.** Restarts a version's FPM master and re-applies its settings. Until now the only way to do that from the CLI was re-running `php set` with the value it already had.
+
+### Fixed
+- **`reeve apply` no longer leaves a web server stopped.** A restart is a launchd bootout followed by a bootstrap, and reeve retried the bootstrap for only about a second while the old process finished exiting. When an Apache child was still busy with a request at shutdown (the error log shows `AH00045: child process … still did not exit`), shutdown took longer than that. The bootstrap then failed with launchd's `Bootstrap failed: 5: Input/output error … Try re-running the command as root`, and apply bailed with Apache booted out: every site refused connections until `reeve server start apache`. It looked tied to deleting a parked site folder only because that was what prompted the apply. A restart now waits for launchd to finish removing the old job (up to 30 seconds, past launchd's own 20-second kill timeout) before starting the new one.
+- **One server failing no longer stops `reeve apply` in its tracks.** A server whose config won't validate or whose restart fails is now reported with its current state and the command that brings it back. The remaining servers and every PHP master are still applied, and the command exits non-zero at the end. The dashboard's `a` does the same.
+- **Command-line PHP no longer runs with Xdebug in debug mode.** Homebrew's `ext-xdebug.ini` sets `xdebug.mode=debug`, and reeve's on/off only ever applied to FPM, so any version with Xdebug installed ran every CLI script with the debugger instrumenting it (about 7× slower on function calls: composer, test suites, `bin/grav`, benchmarks). reeve now writes its own `conf.d/zz-reeve-xdebug.ini` alongside it with `xdebug.mode = "off"`, which sorts later and so overrides it. The file is kept in sync whenever that version's FPM master starts and removed once Xdebug isn't installed. Homebrew's own file is left untouched. Web requests still follow `reeve xdebug`, and a single CLI run can still be debugged with `XDEBUG_MODE=debug XDEBUG_SESSION=1 php script.php`.
+- **phpinfo shows Xdebug as `off` rather than "no value".** PHP's ini parser turns a bare `off` into an empty string. Xdebug treated that as off, but it read like a broken setting. The FPM startup define is now quoted.
+- **`opcache.memory_consumption` actually resizes OPcache.** It was written into the FPM pool as a `php_admin_value`, but OPcache sizes its shared memory in the FPM master before any pool config is read. So `reeve php set 8.3 opcache.memory_consumption 512` restarted FPM and reported success while OPcache stayed at 128 MB. `opcache_get_configuration()` still reported 512, and `opcache_get_status()` showed the gap as hundreds of MB of phantom "used" memory. It's now passed to the master as a startup define, like `opcache.enable` already was, and only once you've set it, so a version you haven't touched keeps whatever its ini files say.
+
 ## 1.1.1
 
 ### Added

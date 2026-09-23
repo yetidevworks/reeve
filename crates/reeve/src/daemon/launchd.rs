@@ -7,6 +7,7 @@ use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 const LABEL_PREFIX: &str = "com.reeve";
 
@@ -124,8 +125,11 @@ pub fn load(service: &str) -> Result<()> {
 
     // bootstrap can transiently fail with "Input/output error" (errno 5) while a
     // just-booted-out job in the same domain is still tearing down. That's a
-    // "retry" signal, not a real failure, so spin briefly before giving up.
-    for attempt in 0..6 {
+    // "retry" signal, not a real failure, so keep retrying for a while before
+    // giving up — `restart` waits for the teardown first, so this only has to
+    // cover the tail end of it.
+    const ATTEMPTS: usize = 25;
+    for attempt in 0..ATTEMPTS {
         let out = Command::new("launchctl")
             .arg("bootstrap")
             .arg(domain())
@@ -146,8 +150,8 @@ pub fn load(service: &str) -> Result<()> {
         }
         // Domain still busy from a prior bootout — wait and retry.
         let retryable = stderr.contains("Input/output error") || stderr.contains(": 5:");
-        if retryable && attempt < 5 {
-            std::thread::sleep(std::time::Duration::from_millis(200));
+        if retryable && attempt + 1 < ATTEMPTS {
+            std::thread::sleep(Duration::from_millis(200));
             continue;
         }
         if !stderr.trim().is_empty() {
@@ -183,11 +187,36 @@ pub fn unload(service: &str) -> Result<()> {
     Ok(())
 }
 
+/// Whether launchd still holds a job for this service in the GUI domain —
+/// running, or booted out but not yet torn down.
+fn is_loaded(service: &str) -> bool {
+    Command::new("launchctl")
+        .args(["print", &service_target(service)])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// How long `restart` waits for a booted-out job to finish tearing down.
+/// launchd sends SIGTERM, then SIGKILL after its default 20 s `ExitTimeOut`,
+/// so this covers a process that ignores the first signal entirely.
+const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Restart = bootout then bootstrap. The full unload/load cycle (rather than
 /// `kickstart`) is required so a rewritten plist's new `ProgramArguments` are
 /// actually re-read — `kickstart` would just re-run the already-loaded job def.
+///
+/// `bootout` returns while the old process may still be shutting down, and
+/// bootstrapping over it fails with errno 5. A server with a child stuck on a
+/// long request (Apache logs `AH00045 ... still did not exit`) can take
+/// seconds to go, so wait for the job to be gone rather than guessing.
 pub fn restart(service: &str) -> Result<()> {
     unload(service).ok();
+    let deadline = Instant::now() + TEARDOWN_TIMEOUT;
+    while is_loaded(service) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
     load(service)
 }
 
