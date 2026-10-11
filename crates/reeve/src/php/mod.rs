@@ -543,10 +543,14 @@ fn build_fpm_conf(php: &PhpVersion) -> Result<String> {
     }
 
     // Fixed plumbing reeve always owns (logging + env passthrough).
+    // `error_log` is a `php_value` (not `php_admin_value`) so apps can still
+    // redirect it at runtime: WordPress's WP_DEBUG_LOG does
+    // `ini_set('error_log', 'wp-content/debug.log')`, which an admin value
+    // silently blocks. Reeve's log stays the default for everything else.
     conf.push_str(&format!(
         "catch_workers_output = yes\n\
          clear_env = no\n\
-         php_admin_value[error_log] = {logs}/php{c}-php.log\n\
+         php_value[error_log] = {logs}/php{c}-php.log\n\
          php_admin_flag[log_errors] = on\n",
         logs = logs.display(),
         c = c,
@@ -1045,6 +1049,9 @@ mod tests {
         assert!(conf.contains("pm.max_children = 10"));
         assert!(conf.contains("php_admin_value[memory_limit] = 256M"));
         assert!(conf.contains("php_admin_flag[display_errors] = on"));
+        // error_log must stay overridable via ini_set (WordPress WP_DEBUG_LOG).
+        assert!(conf.contains("php_value[error_log] = "));
+        assert!(!conf.contains("php_admin_value[error_log]"));
         // Xdebug and opcache.enable are startup defines, NOT pool values (a pool
         // php_admin_value doesn't reliably override conf.d's xdebug.mode).
         assert!(!conf.contains("xdebug.mode"));
