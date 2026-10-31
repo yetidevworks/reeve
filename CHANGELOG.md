@@ -5,6 +5,7 @@ All notable changes to reeve are documented here.
 ## 1.1.3
 
 ### Fixed
+- **WordPress `debug.log` fills again.** PHP-FPM pools set `error_log` as a normal PHP value instead of an admin value, so apps such as WordPress (`WP_DEBUG_LOG`) can send their errors to their own log file. Reeve's PHP log stays the default. Thanks to MatejPodstrelenec (#7). Run `reeve apply` to rewrite the pools.
 - **Grav sites on nginx and Caddy follow Grav 2.2.19's server rules.** Avatar images under `user/accounts` load again, page routes that merely contain a folder name such as `/cache/` or `/tmp/` reach Grav, and the rules now also keep `tmp/`, `webserver-configs/`, hidden files (except `/.well-known/`), Markdown source files such as `CHANGELOG.md`, JSON files under `system/`, `vendor/` and `user/`, and scripts in `images/` and `assets/` private. Run `reeve apply` to rewrite existing vhosts.
 - **Grav multisites served by nginx or Caddy load their themes and plugins.** The Grav security rules refused everything under `user/env/`, which is where a multisite keeps each site's themes, plugins and media, so their CSS, JavaScript and images returned 403. They now block only the `config`, `accounts` and `data` folders inside each `user/env/<name>/`, the same as Grav 2.2.4's own server configs (getgrav/grav#4335). Run `reeve apply` to rewrite existing vhosts.
 
