@@ -5,6 +5,7 @@ All notable changes to reeve are documented here.
 ## 1.1.3
 
 ### Fixed
+- **Grav sites on nginx and Caddy follow Grav 2.2.19's server rules.** Avatar images under `user/accounts` load again, page routes that merely contain a folder name such as `/cache/` or `/tmp/` reach Grav, and the rules now also keep `tmp/`, `webserver-configs/`, hidden files (except `/.well-known/`), Markdown source files such as `CHANGELOG.md`, JSON files under `system/`, `vendor/` and `user/`, and scripts in `images/` and `assets/` private. Run `reeve apply` to rewrite existing vhosts.
 - **Grav multisites served by nginx or Caddy load their themes and plugins.** The Grav security rules refused everything under `user/env/`, which is where a multisite keeps each site's themes, plugins and media, so their CSS, JavaScript and images returned 403. They now block only the `config`, `accounts` and `data` folders inside each `user/env/<name>/`, the same as Grav 2.2.4's own server configs (getgrav/grav#4335). Run `reeve apply` to rewrite existing vhosts.
 
 ## 1.1.2
