@@ -5,7 +5,7 @@
 use crate::brew::Brew;
 use crate::config::Config;
 use crate::daemon::ServiceSpec;
-use crate::state::{Backend, Server, State, Vhost};
+use crate::state::{Backend, PhpVersion, Server, State, Vhost};
 use anyhow::Result;
 
 mod apache;
@@ -149,4 +149,18 @@ pub fn backend_for(backend: Backend) -> Box<dyn WebServerBackend> {
         Backend::Nginx => Box::new(nginx::Nginx),
         Backend::Ols => Box::new(ols::Ols),
     }
+}
+
+/// The installed PHP a (non-proxy) vhost runs on, or an error that says how to
+/// install it. Renderers call this only on their PHP path, so a reverse-proxy
+/// vhost never needs a PHP version.
+pub fn vhost_php<'a>(state: &'a State, v: &Vhost) -> Result<&'a PhpVersion> {
+    state.get_php(&v.php_version).ok_or_else(|| {
+        anyhow::anyhow!(
+            "vhost '{}' needs PHP {} — run `reeve php install {}`",
+            v.server_name,
+            v.php_version,
+            v.php_version
+        )
+    })
 }

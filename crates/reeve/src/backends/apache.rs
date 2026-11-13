@@ -150,18 +150,17 @@ impl Apache {
             out.push_str(&format!("<VirtualHost *:{port}>\n"));
             out.push_str(&format!("    ServerName {}\n", v.server_name));
             if let Some(target) = &v.proxy_target {
-                // Reverse-proxy vhost: forward everything upstream.
+                // Reverse-proxy vhost: forward everything upstream, keeping the
+                // browser's Host (port included) and passing WebSocket upgrades
+                // through for dev-server hot reload.
                 out.push_str("    ProxyPreserveHost On\n");
-                out.push_str(&format!("    ProxyPass / {}/\n", q(target)));
+                out.push_str(&format!(
+                    "    ProxyPass / {}/ upgrade=websocket\n",
+                    q(target)
+                ));
                 out.push_str(&format!("    ProxyPassReverse / {}/\n", q(target)));
             } else {
-                let php = state.get_php(&v.php_version).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "vhost '{}' references uninstalled PHP {}",
-                        v.server_name,
-                        v.php_version
-                    )
-                })?;
+                let php = super::vhost_php(state, v)?;
                 let handler = format!("proxy:unix:{}|fcgi://localhost", php.fpm_socket);
                 let site = crate::project::resolve(v)?;
                 let docroot = &site.docroot;
@@ -431,6 +430,24 @@ mod tests {
         let out = Apache::render_conf(&alt, &[&v], &state, &cfg, &brew).unwrap();
         assert!(out.contains("<VirtualHost *:8080>"));
         assert!(out.contains("RewriteRule ^ https://app.test:8443%{REQUEST_URI} [R=301,L]"));
+    }
+
+    #[test]
+    fn proxy_vhost_preserves_host_and_upgrades_websockets() {
+        // No PHP installed: a proxy vhost doesn't need one.
+        let brew = Brew {
+            prefix: "/opt/homebrew".into(),
+        };
+        let state = State::default();
+        let cfg = Config::default();
+        let mut v = ssl_vhost();
+        v.docroot = String::new();
+        v.php_version = String::new();
+        v.proxy_target = Some("http://localhost:5173".into());
+        let out = Apache::render_conf(&server(), &[&v], &state, &cfg, &brew).unwrap();
+        assert!(out.contains("    ProxyPreserveHost On\n"));
+        assert!(out.contains("    ProxyPass / http://localhost:5173/ upgrade=websocket\n"));
+        assert!(!out.contains("DocumentRoot"));
     }
 
     #[test]

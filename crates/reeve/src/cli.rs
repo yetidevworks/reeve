@@ -227,8 +227,9 @@ pub enum VhostCommands {
     Add {
         /// Hostname, e.g. grav.test
         server_name: String,
-        #[arg(long)]
-        root: String,
+        /// Project directory (not needed for a `--proxy` vhost).
+        #[arg(long, required_unless_present = "proxy")]
+        root: Option<String>,
         /// PHP version (not needed for a `--proxy` vhost).
         #[arg(long, default_value = "")]
         php: String,
@@ -320,4 +321,44 @@ pub enum SslCommands {
     Status,
     /// Print the local CA root certificate path.
     Ca,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vhost_add(args: &[&str]) -> Result<VhostCommands, clap::Error> {
+        let argv = ["reeve", "vhost", "add"].iter().chain(args);
+        match Cli::try_parse_from(argv)?.command {
+            Some(Commands::Vhost(c)) => Ok(c),
+            other => panic!("parsed as {other:?}"),
+        }
+    }
+
+    #[test]
+    fn root_is_optional_only_for_a_proxy_vhost() {
+        // The README's proxy example: no --root, no --php.
+        let c = vhost_add(&[
+            "ui.test",
+            "--proxy",
+            "http://localhost:5173",
+            "--server",
+            "caddy",
+            "--ssl",
+        ])
+        .unwrap();
+        assert!(matches!(
+            c,
+            VhostCommands::Add {
+                root: None,
+                proxy: Some(_),
+                ..
+            }
+        ));
+
+        // A PHP vhost still needs its project directory.
+        let err = vhost_add(&["app.test", "--php", "8.3", "--server", "caddy"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        assert!(err.to_string().contains("--root"), "{err}");
+    }
 }

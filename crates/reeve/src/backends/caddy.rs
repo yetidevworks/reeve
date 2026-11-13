@@ -51,13 +51,7 @@ impl Caddy {
                 // Reverse-proxy vhost: forward everything upstream, no PHP/files.
                 out.push_str(&format!("\treverse_proxy {}\n", quote(target)));
             } else {
-                let php = state.get_php(&v.php_version).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "vhost '{}' references uninstalled PHP {}",
-                        v.server_name,
-                        v.php_version
-                    )
-                })?;
+                let php = super::vhost_php(state, v)?;
                 let site = crate::project::resolve(v)?;
                 out.push_str(&format!("\troot * {}\n", quote(&site.docroot)));
                 out.push_str(crate::preset::caddy_security(site.preset));
@@ -191,17 +185,6 @@ impl WebServerBackend for Caddy {
         cfg: &Config,
         _brew: &Brew,
     ) -> Result<()> {
-        // Re-ensure each referenced PHP version's FPM master is up.
-        for v in vhosts {
-            if state.get_php(&v.php_version).is_none() {
-                bail!(
-                    "vhost '{}' needs PHP {} — run `reeve php install {}`",
-                    v.server_name,
-                    v.php_version,
-                    v.php_version
-                );
-            }
-        }
         let content = Self::render_caddyfile(server, vhosts, state, cfg)?;
         let path = Self::caddyfile(server)?;
         std::fs::write(&path, content)
@@ -310,6 +293,40 @@ mod tests {
         assert!(out.contains("php_fastcgi unix//run/php83.sock"));
         // Proxy vhost forwards upstream and emits no PHP for itself.
         assert!(out.contains("reverse_proxy http://localhost:5173"));
+    }
+
+    #[test]
+    fn proxy_vhost_needs_no_php() {
+        // `vhost add --proxy` stores no PHP version and no root. Rendering it
+        // with no PHP installed at all must work; it used to fail `apply` with
+        // "needs PHP".
+        let state = State::default();
+        let proxy = Vhost {
+            server_name: "timesmith.test".into(),
+            server: "caddy".into(),
+            docroot: String::new(),
+            php_version: String::new(),
+            ssl: true,
+            preset: Framework::Generic,
+            proxy_target: Some("http://127.0.0.1:7340".into()),
+        };
+        let cfg = Config::default();
+        let out = Caddy::render_caddyfile(&server(), &[&proxy], &state, &cfg).unwrap();
+        assert!(out.contains("\treverse_proxy http://127.0.0.1:7340\n"));
+        assert!(!out.contains("php_fastcgi"));
+
+        // A PHP vhost on a missing version still fails, and says how to fix it.
+        let php = Vhost {
+            server_name: "app.test".into(),
+            php_version: "8.4".into(),
+            docroot: "/Sites/app".into(),
+            proxy_target: None,
+            ..proxy
+        };
+        let err = Caddy::render_caddyfile(&server(), &[&php], &state, &cfg)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("reeve php install 8.4"), "{err}");
     }
 
     #[test]

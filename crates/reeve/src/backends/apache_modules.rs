@@ -22,6 +22,9 @@ pub const BASE_MODULES: &[(&str, &str)] = &[
     ("dir_module", "mod_dir.so"),
     ("proxy_module", "mod_proxy.so"),
     ("proxy_fcgi_module", "mod_proxy_fcgi.so"),
+    // `--proxy` vhosts forward over HTTP. Without it every request to one is
+    // a 500 (AH01144: no protocol handler was valid for the URL).
+    ("proxy_http_module", "mod_proxy_http.so"),
     ("rewrite_module", "mod_rewrite.so"),
     ("headers_module", "mod_headers.so"),
     ("setenvif_module", "mod_setenvif.so"),

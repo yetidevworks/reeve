@@ -134,6 +134,10 @@ pub fn resolve(v: &Vhost) -> Result<Resolved> {
 /// is looked up beside the project, not beside `index.php`, and a misplaced one
 /// otherwise fails silently — the site serves fine, just without its env.
 pub fn misplacement_warning(v: &Vhost) -> Option<String> {
+    // A proxy vhost reads no project file, and may have no root at all.
+    if v.is_proxy() {
+        return None;
+    }
     let root = Path::new(&v.docroot);
     let Ok(resolved) = resolve(v) else {
         return None;

@@ -2,6 +2,16 @@
 
 All notable changes to reeve are documented here.
 
+## 1.1.4
+
+### Fixed
+- **`vhost add --proxy` no longer needs `--root`.** The README's `reeve vhost add ui.test --proxy http://localhost:5173 --server caddy --ssl` failed with `the following required arguments were not provided: --root`. `--root` is now optional when `--proxy` is given, the same as `--php`, and still required for every other vhost.
+- **Caddy proxy vhosts apply without PHP.** `reeve apply` refused a Caddy `--proxy` vhost with "vhost 'x' needs PHP — run `reeve php install `" because a check ahead of rendering asked every vhost for a PHP version, proxies included. Only PHP vhosts are checked now, on Caddy, Apache and nginx alike.
+- **Apache proxy vhosts work.** reeve never loaded `mod_proxy_http`, so every request to an Apache `--proxy` vhost was a 500 (`AH01144: No protocol handler was valid for the URL`). It's now part of the base module set, and `ProxyPass` carries `upgrade=websocket` so WebSockets pass through too. Run `reeve apply`.
+- **nginx proxy vhosts keep the port in `Host`.** They sent `Host $host`, which drops the port, so on reeve's nginx (2443) an app saw `Host: app.test` while the browser's `Origin` was `https://app.test:2443`. Apps and frameworks that check Origin for CSRF refused every POST with a 403. They now send `Host $http_host`. Run `reeve apply`.
+- **Server-sent events, WebSockets and dev-server hot reload work through nginx proxy vhosts.** With proxy buffering on, small writes such as SSE events sat in nginx's TLS buffer and the stream never opened, and with no `Upgrade`/`Connection` headers WebSockets failed, so Vite and webpack hot reload never connected. Proxy vhosts now use HTTP/1.1 to the upstream, pass WebSocket upgrades, turn buffering off and allow an hour of idle time. nginx's HTTPS listeners also enable HTTP/2. Run `reeve apply`. Vite 6 and later also need the dev TLD in `server.allowedHosts`, which the README now covers.
+- **Piping reeve into `head` no longer panics.** `reeve vhost list | head -1` printed a `failed printing to stdout: Broken pipe` panic once `head` stopped reading. reeve now exits quietly with status 141, the same as any tool stopped by SIGPIPE.
+
 ## 1.1.3
 
 ### Fixed

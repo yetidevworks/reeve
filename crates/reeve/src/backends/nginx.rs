@@ -87,6 +87,10 @@ impl Nginx {
                 .to_string())
         ));
 
+        // `Connection` for proxied requests: `upgrade` when the client asks for
+        // a WebSocket, otherwise `close`, as nginx sends by default.
+        out.push_str("    map $http_upgrade $connection_upgrade { default upgrade; '' close; }\n");
+
         let fastcgi_conf = etc.join("fastcgi.conf");
 
         for v in vhosts {
@@ -106,6 +110,7 @@ impl Nginx {
             out.push_str("    server {\n");
             if v.ssl {
                 out.push_str(&format!("        listen {} ssl;\n", server.https_port));
+                out.push_str("        http2 on;\n");
                 let cert = paths::certs_dir()?.join(format!("{}.pem", v.server_name));
                 let key = paths::certs_dir()?.join(format!("{}-key.pem", v.server_name));
                 out.push_str(&format!(
@@ -124,22 +129,12 @@ impl Nginx {
                 // Reverse-proxy vhost: forward everything upstream.
                 out.push_str("        location / {\n");
                 out.push_str(&format!("            proxy_pass {target};\n"));
-                out.push_str("            proxy_set_header Host $host;\n");
-                out.push_str(
-                    "            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n",
-                );
-                out.push_str("            proxy_set_header X-Forwarded-Proto $scheme;\n");
+                out.push_str(PROXY_LOCATION);
                 out.push_str("        }\n");
                 out.push_str("    }\n");
                 continue;
             }
-            let php = state.get_php(&v.php_version).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "vhost '{}' references uninstalled PHP {}",
-                    v.server_name,
-                    v.php_version
-                )
-            })?;
+            let php = super::vhost_php(state, v)?;
             let site = crate::project::resolve(v)?;
             out.push_str(&format!("        root {};\n", q(&site.docroot)));
             out.push_str("        index index.php index.html;\n");
@@ -211,6 +206,7 @@ impl Nginx {
                 "        listen {} ssl default_server;\n",
                 server.https_port
             ));
+            out.push_str("        http2 on;\n");
             out.push_str(&format!(
                 "        ssl_certificate {};\n",
                 q(&cert.display().to_string())
@@ -226,6 +222,27 @@ impl Nginx {
         Ok(out)
     }
 }
+
+/// Body of a reverse-proxy vhost's `location /`, after its `proxy_pass`.
+///
+/// - `Host $http_host` keeps the port the browser used (reeve's nginx runs on
+///   2443), so it still matches the `Origin` header. `$host` drops the port,
+///   and apps that check Origin for CSRF then refuse every POST with a 403.
+/// - HTTP/1.1 plus the `Upgrade`/`Connection` pair passes WebSockets through,
+///   which is what Vite and webpack hot reload need.
+/// - Buffering off sends each chunk to the client as it arrives. With it on,
+///   small writes such as server-sent events sit in nginx's 16k TLS buffer and
+///   the stream never opens.
+/// - A long read timeout keeps idle event streams and sockets open.
+const PROXY_LOCATION: &str = "            proxy_http_version 1.1;
+            proxy_set_header Host $http_host;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection $connection_upgrade;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_buffering off;
+            proxy_read_timeout 1h;
+";
 
 /// Quoted nginx string for a `.reeve.toml` env value. nginx interpolates
 /// `$name` inside any string and offers no escape for a literal `$`, so such
@@ -463,6 +480,47 @@ mod tests {
         v.proxy_target = Some("http://localhost:5173".into());
         let out = Nginx::render_conf(&server(), &[&v], &state, &cfg, &brew).unwrap();
         assert!(out.contains("return 301 https://app.test$request_uri;"));
+    }
+
+    #[test]
+    fn proxy_vhost_keeps_port_streams_and_upgrades() {
+        // No PHP installed: a proxy vhost doesn't need one.
+        let brew = Brew {
+            prefix: "/opt/homebrew".into(),
+        };
+        let state = State::default();
+        let cfg = Config::default();
+        let v = Vhost {
+            server_name: "timesmith.test".into(),
+            server: "nginx".into(),
+            docroot: String::new(),
+            php_version: String::new(),
+            ssl: true,
+            preset: Framework::Generic,
+            proxy_target: Some("http://127.0.0.1:7340".into()),
+        };
+        let mut srv = server();
+        srv.https_port = 2443;
+        let out = Nginx::render_conf(&srv, &[&v], &state, &cfg, &brew).unwrap();
+
+        // Host keeps the :2443 so it matches the browser's Origin.
+        assert!(out.contains("proxy_set_header Host $http_host;\n"));
+        assert!(!out.contains("Host $host;"));
+        // Server-sent events and WebSockets (dev-server hot reload).
+        for line in [
+            "proxy_pass http://127.0.0.1:7340;\n",
+            "proxy_http_version 1.1;\n",
+            "proxy_set_header Upgrade $http_upgrade;\n",
+            "proxy_set_header Connection $connection_upgrade;\n",
+            "proxy_buffering off;\n",
+            "proxy_read_timeout 1h;\n",
+        ] {
+            assert!(out.contains(line), "missing {line:?}");
+        }
+        assert!(out.contains(
+            "    map $http_upgrade $connection_upgrade { default upgrade; '' close; }\n"
+        ));
+        assert!(out.contains("        listen 2443 ssl;\n        http2 on;\n"));
     }
 
     #[test]

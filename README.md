@@ -144,6 +144,8 @@ reeve vhost add shop.test --root ~/Sites/shop --php 8.3 --server caddy --ssl --p
 reeve vhost add ui.test --proxy http://localhost:5173 --server caddy --ssl   # reverse proxy
 ```
 
+A proxy vhost passes the browser's `Host` through with its port, along with WebSocket upgrades and streamed responses such as server-sent events, so dev-server hot reload works on Caddy, Apache and nginx. Vite 6 and later refuse hostnames they don't know with a 403 ("Blocked request. This host is not allowed"), so allow the dev TLD in `vite.config.js`: `server: { allowedHosts: ['.test'] }`.
+
 Or park a directory so every project in it just works, no per-site setup:
 
 ```bash
@@ -295,7 +297,8 @@ minutes, and survives closing/reopening the view.
 | `server add <backend> [--http N --https N] [--default-site] [--root <dir>] [--preset <fw>]` | Add caddy\|apache\|nginx (optionally a catch-all default site; `--root` overrides its docroot, else the global sites root) |
 | `server start\|stop\|restart\|list\|remove <name>` | Manage a server (independent) |
 | `server mod list\|add\|remove <name> [module] [--all]` | Manage an Apache server's loaded modules (`list` shows what's loaded, `--all` the whole catalog) |
-| `vhost add <host> --root <dir> --php <ver> --server <name> [--ssl] [--preset <fw>] [--proxy <url>]` | Add a vhost |
+| `vhost add <host> --root <dir> --php <ver> --server <name> [--ssl] [--preset <fw>]` | Add a vhost |
+| `vhost add <host> --proxy <url> --server <name> [--ssl]` | Add a reverse-proxy vhost (no `--root` or `--php` needed) |
 | `vhost list\|remove <host>` | Manage vhosts |
 | `vhost show <host>` | Show how a host is served: docroot, preset, PHP, and its `.reeve.toml` |
 | `service add\|start\|stop\|restart\|remove\|list <kind>` | Manage databases / redis / memcached / mailpit |

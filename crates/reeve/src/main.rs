@@ -33,8 +33,29 @@ use config::{load_config, save_config, Config};
 use state::{load_state, save_state, Backend, Server, Vhost};
 use std::str::FromStr;
 
+/// `reeve vhost list | head` closes stdout early. Rust ignores SIGPIPE, so the
+/// next `println!` panics with "failed printing to stdout: Broken pipe". Exit
+/// quietly instead, with the status a tool killed by SIGPIPE gets (141). The
+/// signal itself stays ignored: restoring it would let a child that exits early
+/// (pecl, while reeve feeds its stdin) kill reeve mid-install.
+fn quiet_broken_pipe() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = info
+            .payload()
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .unwrap_or_default();
+        if msg.starts_with("failed printing to std") && msg.contains("Broken pipe") {
+            std::process::exit(141);
+        }
+        default(info);
+    }));
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    quiet_broken_pipe();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
@@ -941,7 +962,8 @@ fn cmd_vhost(c: VhostCommands) -> Result<()> {
             state.add_vhost(Vhost {
                 server_name: server_name.clone(),
                 server,
-                docroot: root,
+                // A proxy vhost serves nothing from disk, so it may have no root.
+                docroot: root.unwrap_or_default(),
                 php_version: php,
                 ssl,
                 preset,
